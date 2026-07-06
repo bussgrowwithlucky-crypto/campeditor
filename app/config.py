@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # response is mapped into the campeditor Transcript schema. Empty api_key
     # disables transcription (the pipeline renders without captions).
     groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY")
+    groq_api_key_2: str = Field(default="", validation_alias="GROQ_API_KEY_2")
     groq_base_url: str = Field(
         default="https://api.groq.com/openai/v1", validation_alias="GROQ_BASE_URL"
     )
@@ -44,6 +45,15 @@ class Settings(BaseSettings):
     groq_transcription_model: str = Field(
         default="whisper-large-v3-turbo", validation_alias="GROQ_TRANSCRIPTION_MODEL"
     )
+
+    def groq_api_keys(self) -> list[str]:
+        """Return the non-empty Groq API keys in priority order.
+
+        Caller iterates and rotates on auth (401/403) or rate-limit (429)
+        responses. Returns an empty list when neither key is set, which
+        short-circuits the transcription ladder to a no-op.
+        """
+        return [k for k in (self.groq_api_key, self.groq_api_key_2) if k]
 
     # ---- Cloud LLM provider (title generation, clip selection, vision tagging) ----
     # Any OpenAI-compatible chat-completions endpoint. The same base_url +

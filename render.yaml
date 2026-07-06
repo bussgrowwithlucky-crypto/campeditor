@@ -57,6 +57,8 @@ services:
         value: whisper-large-v3-turbo
       - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_API_KEY_2
+        sync: false
       # ---- Intelligent selector v2 knobs (defaults match SPEC §12) ----
       - key: CAMPEDITOR_INTELLIGENT_CINEMA_FLOOR
         value: "0.18"

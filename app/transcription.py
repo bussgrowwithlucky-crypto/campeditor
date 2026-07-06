@@ -49,12 +49,17 @@ def transcribe(
     `Transcript` populated with segments + (when available) word-level
     timestamps from Groq's verbose_json response.
 
+    Rotates across the configured Groq API keys (GROQ_API_KEY and
+    GROQ_API_KEY_2) on auth (401/403) or rate-limit (429) responses so a
+    single exhausted key doesn't take the pipeline down.
+
     `model_size` is silently ignored — model selection is via the
     `GROQ_TRANSCRIPTION_MODEL` env var.
     """
-    if not settings.groq_api_key:
+    keys = settings.groq_api_keys()
+    if not keys:
         logger.warning(
-            "Groq transcription skipped: GROQ_API_KEY not set "
+            "Groq transcription skipped: no GROQ_API_KEY / GROQ_API_KEY_2 set "
             "(rendering without captions)"
         )
         return Transcript()
@@ -64,9 +69,9 @@ def transcribe(
         logger.exception("Audio extraction failed")
         return Transcript()
     try:
-        return _transcribe_with_groq(audio_path, settings)
+        return _transcribe_with_groq(audio_path, settings, keys)
     except Exception:
-        logger.exception("Groq transcription failed")
+        logger.exception("Groq transcription failed (all keys exhausted)")
         return Transcript()
 
 
@@ -101,8 +106,13 @@ def _extract_audio(
     return audio_path
 
 
-def _transcribe_with_groq(audio_path: Path, settings: Settings) -> Transcript:
+def _transcribe_with_groq(audio_path: Path, settings: Settings, keys: list[str]) -> Transcript:
     """POST the WAV to Groq's transcription endpoint, return a Transcript.
+
+    Tries each key in order on auth (401/403) or rate-limit (429) responses
+    so a single exhausted/banned key doesn't take the pipeline down.
+    Non-rotating errors (5xx, 4xx other than auth/rate) are raised
+    immediately — retrying those with another key won't help.
 
     Uses `response_format=verbose_json` and requests both segment- and
     word-level timestamp granularities. Word timestamps are only emitted
@@ -115,31 +125,75 @@ def _transcribe_with_groq(audio_path: Path, settings: Settings) -> Transcript:
     url = f"{base_url}/audio/transcriptions"
     model = settings.groq_transcription_model or DEFAULT_GROQ_MODEL
 
-    logger.info("Groq transcription: model=%s, file=%s", model, audio_path.name)
-    with open(audio_path, "rb") as audio_file:
-        response = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
-            files={"file": (audio_path.name, audio_file, "audio/wav")},
-            data={
-                "model": model,
-                "response_format": "verbose_json",
-                "timestamp_granularities[]": "segment",
-                "timestamp_granularities[]": "word",
-            },
-            timeout=GROQ_TIMEOUT_SECONDS,
+    # Status codes that mean "this key is no good, try the next one".
+    # 401/403 = auth/revoked; 429 = per-key quota exhausted.
+    ROTATABLE_STATUSES = {401, 403, 429}
+
+    last_error: Exception | None = None
+    for key_index, api_key in enumerate(keys):
+        logger.info(
+            "Groq transcription: model=%s, file=%s, key=%d/%d",
+            model, audio_path.name, key_index + 1, len(keys),
         )
-    if response.status_code >= 400:
-        # Surface the Groq error message so failures are diagnosable
-        # without attaching the raw HTTP body.
-        try:
-            err = response.json()
-        except Exception:
-            err = {"error": response.text[:500]}
-        raise RuntimeError(
-            f"Groq transcription HTTP {response.status_code}: {err}"
-        )
-    payload = response.json()
+        with open(audio_path, "rb") as audio_file:
+            try:
+                response = httpx.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": (audio_path.name, audio_file, "audio/wav")},
+                    data={
+                        "model": model,
+                        "response_format": "verbose_json",
+                        "timestamp_granularities[]": "segment",
+                        "timestamp_granularities[]": "word",
+                    },
+                    timeout=GROQ_TIMEOUT_SECONDS,
+                )
+            except httpx.HTTPError as exc:
+                # Network-level failure — try the next key. The next call
+                # is independent so a transient connect failure shouldn't
+                # cascade into a full pipeline stall.
+                logger.warning(
+                    "Groq transcription key %d/%d network error: %s",
+                    key_index + 1, len(keys), exc,
+                )
+                last_error = exc
+                continue
+
+        if response.status_code in ROTATABLE_STATUSES:
+            # Surface the Groq error message so failures are diagnosable.
+            try:
+                err = response.json()
+            except Exception:
+                err = {"error": response.text[:500]}
+            logger.warning(
+                "Groq transcription key %d/%d returned HTTP %d: %s — "
+                "rotating to next key",
+                key_index + 1, len(keys), response.status_code, err,
+            )
+            last_error = RuntimeError(
+                f"Groq transcription HTTP {response.status_code}: {err}"
+            )
+            continue
+
+        if response.status_code >= 400:
+            # Non-rotating error (500, 400, etc.) — bail out; another key
+            # won't help and the caller surfaces this to the user.
+            try:
+                err = response.json()
+            except Exception:
+                err = {"error": response.text[:500]}
+            raise RuntimeError(
+                f"Groq transcription HTTP {response.status_code}: {err}"
+            )
+
+        payload = response.json()
+        break  # success — fall through to parsing
+    else:
+        # Every key exhausted; raise the last error so the outer
+        # try/except can log it and return an empty Transcript.
+        assert last_error is not None
+        raise last_error
 
     # verbose_json shape:
     #   { "task": "transcribe", "language": "en", "duration": ...,
