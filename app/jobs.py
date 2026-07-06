@@ -21,6 +21,7 @@ from app.broll import (
     build_reference_house_style,
     fetch_broll_cuts,
     fetch_broll_cut_variations,
+    fetch_hook_broll,
     fetch_learned_broll_cuts,
     gather_broll_pack,
 )
@@ -408,6 +409,33 @@ class Pipeline:
                     # same on-disk state and silently overwrite each other.
                     update_broll_profile_atomic(self.settings, job.reference)
 
+                # Hook replication: the reference's first 0.5-3.5s of
+                # music-over-broll is captured in job.reference.hook_span +
+                # hook_tags. Prepend a matching library clip so the rendered
+                # short opens with the same kind of hook. Failure here is
+                # non-fatal — the regular broll_recovery ladder still
+                # produces the rest of the cuts.
+                if (
+                    job.reference
+                    and job.reference.hook_span
+                    and job.reference.hook_tags
+                ):
+                    hook_start, hook_end = job.reference.hook_span
+                    hook_dur = max(0.0, hook_end - hook_start)
+                    if hook_dur > 0:
+                        try:
+                            hook_clip = fetch_hook_broll(
+                                job.reference.hook_tags,
+                                hook_dur,
+                                work_dir / "hook",
+                                self.settings,
+                            )
+                            if hook_clip is not None:
+                                job.hook_clip_path = hook_clip
+                                job.hook_span = (0.0, hook_dur)
+                        except Exception:
+                            logger.exception("Hook B-roll fetch failed")
+
             # ── Auto source-finding from Frame.io folder ─────────────
             if job.frameio_source_url and job.reference_path:
                 self._advance(
@@ -582,6 +610,23 @@ class Pipeline:
                     )
                     broll_cut_lists[0] = job.broll_cuts
                     self.store.save(job)
+
+            # Prepend the hook B-roll (if any) as the first cut in every
+            # variation list. The reference's first 0.5-3.5s of music-over-
+            # broll is the "hook" that grabs attention; the output should
+            # open with a matching clip from the local library so the
+            # rendered short has the same kind of lead-in.
+            if job.hook_clip_path is not None and job.hook_span is not None:
+                from app.models import BrollCut as _HookCut
+                _hook = _HookCut(
+                    start=0.0,
+                    end=max(0.0, job.hook_span[1] - job.hook_span[0]),
+                    clip_path=job.hook_clip_path,
+                    query="hook",
+                )
+                broll_cut_lists = [
+                    [_hook, *cuts] for cuts in broll_cut_lists
+                ]
 
             # Pad broll_cut_lists to variation_count if broll didn't supply
             # enough (e.g. no reference or spans = 0). Each slot gets a

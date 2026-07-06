@@ -219,6 +219,11 @@ class Job(BaseModel):
     logo_path: Path | None = None
     reference: ReferenceAnalysis | None = None
     broll_cuts: list[BrollCut] = Field(default_factory=list)
+    # Lead-in hook clip selected to replicate the reference's first
+    # 0.5-3.5s of music-over-broll. Inserted as the first BrollCut at
+    # render time. None when the reference has no detectable hook.
+    hook_clip_path: Path | None = None
+    hook_span: tuple[float, float] | None = None
     broll_recovery: list[BrollRecoveryDiagnostic] = Field(default_factory=list)
     # ── B-roll pack (downloadable stock alternatives) ─────────────────────
     # When True (only meaningful in replicate mode), the pipeline runs

@@ -158,6 +158,8 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
                 broll_query_source=list(cached.get("broll_query_source", [])),
                 music_path=None,  # re-attempted below if cache says None
                 music_volume_db=cached.get("music_volume_db"),
+                hook_span=tuple(cached["hook_span"]) if cached.get("hook_span") else None,
+                hook_tags=cached.get("hook_tags"),
             )
             # Always re-attempt music extraction on cache hit. The cache was
             # written before music_path was persisted, and even when it
@@ -230,6 +232,19 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
     music_path = _extract_music(reference_path, transcript, duration, ref_dir, settings)
     music_volume_db = _mean_volume_db(music_path, settings) if music_path else None
 
+    # Hook detection: a 0.5-3.5s continuous-speech-free window at the start
+    # of the reference is treated as the lead-in B-roll hook. We describe
+    # it with vision (subjects/category) and a dedicated personality call
+    # so the output pipeline can find a matching library clip to prepend.
+    hook_span = _detect_hook(transcript, duration)
+    hook_tags: dict | None = None
+    if hook_span is not None:
+        try:
+            hook_tags = _describe_hook(frames, hook_span, ref_dir, settings)
+        except Exception:
+            logger.exception("Hook description failed")
+            hook_tags = None
+
     analysis = ReferenceAnalysis(
         duration=duration,
         title_text=title_text,
@@ -239,6 +254,8 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
         broll_query_source=broll_query_source,
         music_path=music_path,
         music_volume_db=music_volume_db,
+        hook_span=hook_span,
+        hook_tags=hook_tags,
     )
 
     # Persist the analysis to cache. transcript.words is stored so a
@@ -262,6 +279,8 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
             "broll_query_source": analysis.broll_query_source,
             "music_volume_db": analysis.music_volume_db,
             "music_tried": music_path is not None,
+            "hook_span": list(analysis.hook_span) if analysis.hook_span else None,
+            "hook_tags": analysis.hook_tags,
         }, indent=2), encoding="utf-8")
     except OSError:
         logger.debug("Could not write reference analysis cache for %s", reference_path)
@@ -352,6 +371,162 @@ def _reference_cache_key(reference_path: Path) -> str:
     except OSError:
         pass
     return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Hook detection (lead-in B-roll at the start of the reference)
+# ---------------------------------------------------------------------------
+
+
+# A hook is a continuous-speech-free window at the start of the reference
+# where the visual is a B-roll cutaway — no on-screen caption, no speaker.
+# Common in viral shorts: 0.5-3s of music-over-broll to grab attention,
+# then the A-roll kicks in. We treat anything in the [0.5, 3.5] second
+# range as a hook; outside that band it's either not a hook (speech starts
+# immediately) or a longer intro segment handled by the regular B-roll
+# pipeline.
+HOOK_MIN_SECONDS = 0.5
+HOOK_MAX_SECONDS = 3.5
+
+
+def _detect_hook(
+    transcript: Transcript,
+    duration: float,
+) -> tuple[float, float] | None:
+    """Return (start, end) seconds of the lead-in hook, or None.
+
+    Detection rule: the first word's `start` is the hook's end. If the
+    gap before the first word is in [HOOK_MIN_SECONDS, HOOK_MAX_SECONDS],
+    it's a hook. No speech at all (continuous B-roll/music) also counts
+    as a hook capped at HOOK_MAX_SECONDS.
+    """
+    if duration <= 0:
+        return None
+    if not transcript.words:
+        # No speech — the whole video is effectively a hook, but cap it.
+        return (0.0, min(duration, HOOK_MAX_SECONDS))
+    first_word_start = min((w.start for w in transcript.words), default=0.0)
+    if HOOK_MIN_SECONDS <= first_word_start <= HOOK_MAX_SECONDS:
+        return (0.0, first_word_start)
+    return None
+
+
+def _describe_hook(
+    frames: list[Path],
+    hook_span: tuple[float, float],
+    ref_dir: Path,
+    settings: Settings,
+) -> dict:
+    """Sample 1-2 frames from the hook window and run vision for tags + personality.
+
+    Returns a dict with: subjects, setting, action, category, query (str),
+    and `personality` (famous person name, or ""). Results are cached on disk
+    keyed by the frame's content hash so repeat references are free.
+    """
+    import json as _json
+    from app.broll import _frame_tags, _frame_content_hash, _merge_tags
+
+    start, end = hook_span
+    hook_duration = end - start
+    if hook_duration <= 0 or not frames:
+        return {}
+
+    # Sample 2 frames inside the hook window: ~33% and ~66% in.
+    sample_indices: list[int] = []
+    for frac in (0.33, 0.66):
+        idx = int(hook_duration * 10 * frac)  # 10 fps = FRAME_FPS
+        if 0 <= idx < len(frames):
+            sample_indices.append(idx)
+    if not sample_indices:
+        sample_indices = [0]
+
+    # Tag cache: keyed by frame content hash, separate from the regular
+    # broll_tags cache because the prompt is hook-specific and the result
+    # includes the personality field.
+    hook_cache = settings.data_dir / "cache" / "hook_tags"
+    hook_cache.mkdir(parents=True, exist_ok=True)
+    personality_cache = settings.data_dir / "cache" / "personalities"
+    personality_cache.mkdir(parents=True, exist_ok=True)
+
+    frame_tags_list: list[dict] = []
+    for idx in sample_indices:
+        frame = frames[idx]
+        try:
+            content_hash = _frame_content_hash(frame)
+        except Exception:
+            content_hash = None
+        cache_file = hook_cache / f"{content_hash}.json" if content_hash else None
+        tag: dict = {}
+        if cache_file and cache_file.exists():
+            try:
+                tag = _json.loads(cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                tag = {}
+        if not tag:
+            try:
+                tag = _frame_tags(frame, settings, None) or {}
+            except Exception:
+                tag = {}
+            if cache_file and tag:
+                try:
+                    cache_file.write_text(_json.dumps(tag, ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    pass
+        if tag:
+            frame_tags_list.append(tag)
+
+    merged: dict = _merge_tags(frame_tags_list) if frame_tags_list else {}
+    # Personality detection on the mid-hook frame. Cached by content hash
+    # so a re-upload of the same reference never re-asks the vision model.
+    personality = ""
+    mid_frame = frames[sample_indices[0]]
+    try:
+        content_hash = _frame_content_hash(mid_frame)
+    except Exception:
+        content_hash = None
+    if content_hash:
+        p_cache = personality_cache / f"{content_hash}.txt"
+        if p_cache.exists():
+            try:
+                personality = p_cache.read_text(encoding="utf-8").strip()
+            except OSError:
+                personality = ""
+    if not personality:
+        personality = _identify_personality(mid_frame, settings)
+        if content_hash and personality is not None:
+            try:
+                p_cache.write_text(personality or "", encoding="utf-8")
+            except OSError:
+                pass
+    merged["personality"] = personality or ""
+    return merged
+
+
+def _identify_personality(image_path: Path, settings: Settings) -> str:
+    """Ask vision to identify the famous personality/celebrity in `image_path`.
+
+    Returns the name, or "" if none / call failed. The prompt is constrained
+    to reply with ONLY a name or NONE so the parse is trivial and a
+    hallucinated long paragraph doesn't poison the B-roll search.
+    """
+    try:
+        text = _broll_vision(
+            image_path,
+            "What famous personality, business figure, or celebrity is shown "
+            "in this image? Reply with ONLY their name (e.g. 'Elon Musk', "
+            "'Mark Zuckerberg'), or NONE if no recognizable famous person is "
+            "visible. Do not include any explanation or description.",
+            settings,
+        )
+    except Exception:
+        return ""
+    text = (text or "").strip()
+    if not text or text.upper() == "NONE":
+        return ""
+    # Reject anything that looks like a sentence rather than a name.
+    if len(text) > 60 or "\n" in text:
+        return ""
+    return text
 
 
 # ---------------------------------------------------------------------------

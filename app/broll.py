@@ -2445,6 +2445,94 @@ def fetch_broll_cut_variations(
     return cut_lists
 
 
+def fetch_hook_broll(
+    hook_tags: dict | None,
+    hook_duration: float,
+    work_dir: Path,
+    settings: Settings,
+) -> Path | None:
+    """Find a local library B-roll matching the reference's hook tags.
+
+    The hook is the 0.5-3.5s lead-in cutaway at the start of the reference
+    (see _detect_hook in app/replicate). The output pipeline prepends
+    whatever this function returns so the rendered short opens with the
+    same kind of hook — typically a famous-person / businessman / space /
+    celebrity clip from the local library.
+
+    Scoring (in priority order):
+      - personality name appears in the clip's path or subjects   → +10
+      - subject overlap with hook subjects                          → +2 per hit
+      - category match                                              → +1
+
+    The first clip with score > 0 wins. Returns the trimmed clip path
+    (a 1080x1080 mute video of length hook_duration) or None.
+    """
+    if not hook_tags or hook_duration <= 0:
+        return None
+    personality = (hook_tags.get("personality") or "").lower().strip()
+    subjects = [str(s).lower() for s in (hook_tags.get("subjects") or [])]
+    category = (hook_tags.get("category") or "").lower().strip()
+
+    library_index = build_library_index(settings)
+    if not library_index:
+        return None
+
+    def _score(clip: LibraryClip) -> float:
+        score = 0.0
+        if personality:
+            path_str = str(clip.path).lower()
+            if personality in path_str:
+                score += 10.0
+            for s in clip.subjects or []:
+                sl = str(s).lower()
+                if personality and (personality in sl or sl in personality):
+                    score += 5.0
+                    break
+        clip_subjects = {str(s).lower() for s in (clip.subjects or [])}
+        overlap = len({s for s in subjects if s} & clip_subjects)
+        score += overlap * 2.0
+        if category and category == (clip.category or "").lower():
+            score += 1.0
+        return score
+
+    scored = sorted(
+        ((_score(clip), clip) for clip in library_index),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out_path = work_dir / "hook_broll.mp4"
+    for score, clip in scored:
+        if score <= 0:
+            break
+        try:
+            result = subprocess.run(
+                [
+                    settings.ffmpeg_path,
+                    "-y",
+                    "-i", str(clip.path),
+                    "-t", f"{hook_duration:.3f}",
+                    "-vf",
+                    "scale=1080:1080:force_original_aspect_ratio=increase,"
+                    "crop=1080:1080,setsar=1",
+                    "-an",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "23",
+                    "-r", "30",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 5_000:
+            return out_path
+    return None
+
+
 def fetch_broll_cuts(
     analysis: ReferenceAnalysis,
     reference_path: Path,
