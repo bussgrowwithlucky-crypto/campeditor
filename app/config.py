@@ -5,6 +5,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_ENV_FILE = _PROJECT_ROOT / ".env"
+
+
 class Settings(BaseSettings):
     """campeditor settings.
 
@@ -24,7 +28,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,
