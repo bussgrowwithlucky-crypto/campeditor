@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import threading
 import time
 import concurrent.futures
@@ -37,7 +37,7 @@ def _job_broll_span_count(job: Job) -> int:
     """Number of B-roll spans detected in the job's reference analysis.
 
     Used to scale the broll_recovery stage prior in ETA forecasting. Returns 0
-    when the reference has not been analyzed yet (early stages) â€” the ETA
+    when the reference has not been analyzed yet (early stages) Ã¢â‚¬â€ the ETA
     scaler then falls back to a single-span prior, which is a safe
     underestimate."""
     reference = getattr(job, "reference", None)
@@ -55,8 +55,8 @@ class Pipeline:
     # How long a non-terminal job may go without meta.json being updated
     # before the watchdog kills it. INGESTED jobs that don't advance within
     # this window are typically a sign that the executor silently dropped
-    # the future â€” better to surface a clear failure than spin forever.
-    # Raised from 120s â†’ 900s because the per-job heartbeat thread is a
+    # the future Ã¢â‚¬â€ better to surface a clear failure than spin forever.
+    # Raised from 120s Ã¢â€ â€™ 900s because the per-job heartbeat thread is a
     # Python thread blocked on the GIL while the worker runs CPU-bound code
     # inside fetch_broll_cuts / fetch_broll_cut_variations (5-10 min on a
     # full reference), so mtime can legitimately go stale for minutes even
@@ -69,7 +69,7 @@ class Pipeline:
     # the watchdog can distinguish "worker actively running" from "worker
     # silently dropped the future".
     WORKER_HEARTBEAT_SECONDS: float = 30.0
-    # Per-stage stuck-job timeout. broll_recovery is the long pole â€” its
+    # Per-stage stuck-job timeout. broll_recovery is the long pole Ã¢â‚¬â€ its
     # ETA forecast alone is up to ~600s and on slow cloud vision calls it
     # can run significantly longer. Keep the early stages on the global
     # default (900s) so a stuck INGESTED/ANALYZING job is still caught.
@@ -197,7 +197,7 @@ class Pipeline:
         # add_caption gates the ASS caption burn-in for replicate jobs.
         # Defaults to True to preserve historical behavior; unchecked users
         # get a title-only render. Transcription still runs (the title +
-        # B-roll queries depend on it) â€” only the burn-in step is skipped.
+        # B-roll queries depend on it) Ã¢â‚¬â€ only the burn-in step is skipped.
         job.add_caption = bool(add_caption)
         # Where span B-roll may come from (replicate jobs): the synced
         # Frame.io share, YouTube search, or both. Reference-crop stays the
@@ -433,7 +433,7 @@ class Pipeline:
             logger.exception("Could not bump mtime at start of job %s", job_id)
         # Heartbeat thread: keep meta.json's mtime fresh during long stages
         # by re-saving every WORKER_HEARTBEAT_SECONDS. The watchdog uses
-        # this signal to know the worker is still alive â€” without it, jobs
+        # this signal to know the worker is still alive Ã¢â‚¬â€ without it, jobs
         # in broll_recovery (5-10 min) get killed mid-stage because their
         # meta.json looks stale. Cheap: just a disk stat + write of ~1KB.
         stop_heartbeat = Event()
@@ -451,12 +451,12 @@ class Pipeline:
         try:
             # Folder jobs auto-discover source_path later; all other jobs
             # require a pre-uploaded raw video. Only fail when BOTH are
-            # missing â€” a normal upload job legitimately has an empty
+            # missing Ã¢â‚¬â€ a normal upload job legitimately has an empty
             # frameio_source_url but a set source_path.
             if not job.frameio_source_url and job.source_path is None:
                 raise ValueError(
                     f"Job {job.id} has no source video uploaded and is not a "
-                    "Frame.io folder job â€” cannot run."
+                    "Frame.io folder job Ã¢â‚¬â€ cannot run."
                 )
             work_dir = self.store.job_dir(job.id)
             job.stage_started_at = time.time()
@@ -507,7 +507,7 @@ class Pipeline:
                     # same on-disk state and silently overwrite each other.
                     update_broll_profile_atomic(self.settings, job.reference)
 
-            # â”€â”€ Auto source-finding from Frame.io folder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # Ã¢â€â‚¬Ã¢â€â‚¬ Auto source-finding from Frame.io folder Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             if job.frameio_source_url and job.reference_path:
                 self._advance(
                     job, cancellation, JobStatus.ANALYZING, 0.18,
@@ -535,7 +535,7 @@ class Pipeline:
                 job.end = raw_end
                 job.clip_mode = ClipMode.MANUAL  # timestamps already set
                 job.message = (
-                    f"Found source: {source_path.name} @ [{raw_start:.1f}sâ€“{raw_end:.1f}s] "
+                    f"Found source: {source_path.name} @ [{raw_start:.1f}sÃ¢â‚¬â€œ{raw_end:.1f}s] "
                     f"(score={match_score:.2f})"
                 )
                 self.store.save(job)
@@ -564,7 +564,7 @@ class Pipeline:
             #
             # broll_pack forces variation_count = 1: in replicate mode every
             # variation shares one title, so the only thing that would differ
-            # across renders is the B-roll source clips â€” and when broll_pack
+            # across renders is the B-roll source clips Ã¢â‚¬â€ and when broll_pack
             # is on those clips are exported separately rather than inserted,
             # so multiple renders would be byte-identical files. One render is
             # the correct output.
@@ -573,7 +573,7 @@ class Pipeline:
             else:
                 variation_count = 1 if job.bulk else max(1, self.settings.variation_count)
 
-            # â”€â”€ B-roll library preparation (deferred Frame.io sync) â”€â”€â”€â”€â”€â”€â”€
+            # Ã¢â€â‚¬Ã¢â€â‚¬ B-roll library preparation (deferred Frame.io sync) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             # Runs AFTER titling so the stage order the user sees stays
             # upload -> analyzing -> transcribing -> titling -> b-roll.
             # Under BROLL_RECOVERY so the watchdog grants the long-stage
@@ -603,7 +603,7 @@ class Pipeline:
                 # Optional secondary share (BROLL_FRAMEIO_SHARE_URL_2),
                 # toggled per-job via the "Also search folder 2" checkbox.
                 # Its mirror is MERGED into the same searchable index as
-                # folder 1 â€” the matcher sees one combined library.
+                # folder 1 Ã¢â‚¬â€ the matcher sees one combined library.
                 use_secondary = bool(getattr(job, "use_broll_frameio_2", False))
                 secondary_url = self.settings.broll_frameio_share_url_2.strip()
                 if use_secondary and secondary_url:
@@ -637,7 +637,7 @@ class Pipeline:
                 # music-over-broll is captured in job.reference.hook_span +
                 # hook_tags. Prepend a matching library clip so the rendered
                 # short opens with the same kind of hook. Failure here is
-                # non-fatal â€” the regular broll_recovery ladder still
+                # non-fatal Ã¢â‚¬â€ the regular broll_recovery ladder still
                 # produces the rest of the cuts. Skipped in youtube-only
                 # mode (the hook is a library feature).
                 if broll_use_library and job.reference.hook_span and job.reference.hook_tags:
@@ -665,10 +665,10 @@ class Pipeline:
                 # Compute reference_house_style ONCE per job (before the
                 # first B-roll rung) so per-span scoring can back-fill
                 # empty span vibe fields from a stable per-job aggregate
-                # (SPEC Â§8). This is the SAME aggregate for the pack path
+                # (SPEC Ã‚Â§8). This is the SAME aggregate for the pack path
                 # AND the variations path, so they're consistent.
                 reference_house = build_reference_house_style(job.reference)
-                # ContinuityLedger per job (SPEC Â§9): every fetch_* call
+                # ContinuityLedger per job (SPEC Ã‚Â§9): every fetch_* call
                 # below shares this instance so consecutive span picks pay
                 # the diversity tax. The ledger's internal history is
                 # reset at the start of each variation inside
@@ -771,7 +771,7 @@ class Pipeline:
                         "cookie box or switch the B-roll source."
                     )
                 job.warning = (
-                    f"YouTube B-roll source had problems ({unique_errors[0]}) â€” "
+                    f"YouTube B-roll source had problems ({unique_errors[0]}) Ã¢â‚¬â€ "
                     "B-roll came from the library/Frame.io rung."
                 )
                 self.store.save(job)
@@ -869,7 +869,7 @@ class Pipeline:
                 # Server restart, not a user action: keep the job
                 # non-terminal so _resume_interrupted_jobs re-runs it on
                 # the next startup. Cached stages make the re-run cheap.
-                job.message = "Interrupted by server restart â€” resumes automatically"
+                job.message = "Interrupted by server restart Ã¢â‚¬â€ resumes automatically"
                 self.store.save(job)
             else:
                 job.status = JobStatus.FAILED
@@ -904,7 +904,7 @@ class Pipeline:
             # cover it.
             self.job_futures.pop(job_id, None)
 
-    # â”€â”€ ETA estimation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Ã¢â€â‚¬Ã¢â€â‚¬ ETA estimation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     # Empirical stage durations (seconds) used as priors when no historical
     # stage_timings are available.  These are tuned to a typical 20s reference
     # with 8 B-roll spans on a mid-range GPU.  The _advance helper refines
@@ -916,10 +916,10 @@ class Pipeline:
         "transcribing": 8.0,
         "selecting": 2.0,
         "titling": 2.0,
-        "broll_recovery": 180.0,  # scaled by span count below
+        "broll_recovery": 25.0,
         "rendering": 35.0,
     }
-    # Ordered pipeline for ETA forecasting (last â†’ first = remaining stages).
+    # Ordered pipeline for ETA forecasting (last Ã¢â€ â€™ first = remaining stages).
     _STAGE_ORDER: list[str] = [
         "ingested", "analyzing", "transcribing", "selecting",
         "titling", "broll_recovery", "rendering",
@@ -930,7 +930,7 @@ class Pipeline:
 
         Uses a two-signal approach:
           1. If we've already completed at least one stage, use its *actual*
-             elapsed time (stage_timings) as the anchor â€” better than the
+             elapsed time (stage_timings) as the anchor Ã¢â‚¬â€ better than the
              static prior.
           2. For stages not yet reached, fall back to the static prior,
              scaled by clip_duration (longer clips need proportionally more
@@ -949,7 +949,7 @@ class Pipeline:
         except ValueError:
             return 0.0
 
-        # Per-job active stage list â€” manual-mode jobs skip the SELECTING
+        # Per-job active stage list Ã¢â‚¬â€ manual-mode jobs skip the SELECTING
         # stage entirely (they go straight from TRANSCRIBING to TITLING), and
         # the "selecting" prior was inflating manual-mode ETA forecasts by ~2s
         # for no reason. Future per-job exclusions should land here.
@@ -970,12 +970,12 @@ class Pipeline:
                 # spans detected in the reference (each span needs ~180s of
                 # ytsearch + ffmpeg scoring). Cap at the REAL worst-case ceiling
                 # derived from the configured recovery budget (was a hardcoded
-                # 3600.0 â€” stale as soon as BROLL_RECOVERY_BUDGET_SECONDS is
+                # 3600.0 Ã¢â‚¬â€ stale as soon as BROLL_RECOVERY_BUDGET_SECONDS is
                 # changed, e.g. to 180 for a fast render, which used to forecast
                 # a wildly wrong ~17 minutes even though the pipeline itself was
                 # bounded to a few minutes).
-                span_count = _job_broll_span_count(job)
-                scaled = prior * max(1, span_count) * clip_factor
+                # Fast Frame.io/local matching is no longer modeled per span.
+                scaled = prior * clip_factor
                 scaled = min(scaled, self._broll_recovery_ceiling_seconds())
             # Replace static prior with historical average when available.
             historical = job.stage_timings.get(stage_name)
@@ -992,8 +992,6 @@ class Pipeline:
             if current == "rendering":
                 stage_prior *= var_factor
             elif current == "broll_recovery":
-                span_count = _job_broll_span_count(job)
-                stage_prior = stage_prior * max(1, span_count)
                 stage_prior = min(stage_prior, self._broll_recovery_ceiling_seconds())
             # Use the historical data as a better prior if available.
             historical = job.stage_timings.get(current)
@@ -1003,8 +1001,6 @@ class Pipeline:
         else:
             stage_prior = self._DEFAULT_STAGE_SECONDS.get(current, 10.0) * clip_factor
             if current == "broll_recovery":
-                span_count = _job_broll_span_count(job)
-                stage_prior = stage_prior * max(1, span_count)
                 stage_prior = min(stage_prior, self._broll_recovery_ceiling_seconds())
             remaining += stage_prior
 
@@ -1019,12 +1015,11 @@ class Pipeline:
         here. This is purely a forecasting cap on the ETA display, not an
         enforced deadline.
 
-        With the 4-way parallel span sourcing in app.broll, wall-clock is
-        closer to (longest span Ã— ceil(spans / 4)) than to (per-span Ã— spans);
-        10 min is a still-conservative upper bound that doesn't overshoot 8-span
-        jobs AND doesn't pretend they'll hit the old 15 min sequential ceiling.
+        Frame.io sync uses a local mirror and the B-roll picker runs spans in
+        parallel, so this cap is intentionally small. It is only a display
+        forecast, not an enforced timeout.
         """
-        return 600.0
+        return 45.0
 
     def _watchdog_loop(self) -> None:
         """Background sweeper that fails jobs whose meta.json hasn't been
@@ -1054,12 +1049,12 @@ class Pipeline:
         Two legitimate scenarios produce stale mtimes with an alive worker:
           1. The job is queued behind another job in the executor's task
              queue (worker_count < concurrent submissions). The future is
-             PENDING â€” `future.running()` is False and `future.done()` is
+             PENDING Ã¢â‚¬â€ `future.running()` is False and `future.done()` is
              False.
           2. The job is mid-stage in a long-running operation (broll_recovery
              can run 5-10 min). The heartbeat thread in _run keeps mtime
              fresh, but only every WORKER_HEARTBEAT_SECONDS.
-        In both cases we skip â€” killing them would just generate false
+        In both cases we skip Ã¢â‚¬â€ killing them would just generate false
         positives for jobs that would have completed successfully.
         """
         now = time.time()
@@ -1074,7 +1069,7 @@ class Pipeline:
             except OSError:
                 continue
             if mtime >= cutoff:
-                continue  # recently touched â€” probably still progressing
+                continue  # recently touched Ã¢â‚¬â€ probably still progressing
             if job_dir.name in self._watchdog_unrecoverable:
                 continue  # already logged once; won't fix itself, don't retry forever
             try:
@@ -1086,7 +1081,7 @@ class Pipeline:
                 job_id = data.get("id") or job_dir.name
                 # Cross-check the future state. If the worker is still
                 # alive (running or queued in the executor), the stale mtime
-                # is either queueing latency or a missing heartbeat tick â€”
+                # is either queueing latency or a missing heartbeat tick Ã¢â‚¬â€
                 # NOT a dropped future. Bail out and let the next sweep
                 # decide once the heartbeat has caught up.
                 future = self.job_futures.get(job_id)
@@ -1094,7 +1089,7 @@ class Pipeline:
                     if future.running() or not future.done():
                         # Worker is alive (executing or queued). Skip.
                         continue
-                    # Future is done with no exception â†’ worker completed
+                    # Future is done with no exception Ã¢â€ â€™ worker completed
                     # cleanly but somehow the job isn't in a terminal state.
                     # That's a real bug (missing READY/FAILED save) and
                     # deserves the watchdog kill.
@@ -1106,7 +1101,7 @@ class Pipeline:
                     status_str or "", self.STUCK_JOB_TIMEOUT_SECONDS,
                 )
                 if mtime >= now - stage_timeout:
-                    # Still within the per-stage window â€” give it more time.
+                    # Still within the per-stage window Ã¢â‚¬â€ give it more time.
                     continue
                 # Trip the cancellation event so a still-running worker
                 # (race between the future.running() check above and now)
@@ -1124,7 +1119,7 @@ class Pipeline:
                 job.message = "Job failed"
                 job.error = (
                     f"Job did not advance within "
-                    f"{stage_timeout:.0f}s in stage '{status_str}' â€” the "
+                    f"{stage_timeout:.0f}s in stage '{status_str}' Ã¢â‚¬â€ the "
                     "worker thread likely dropped the task. Restart the "
                     "server and resubmit."
                 )[-1000:]
@@ -1230,7 +1225,7 @@ def _music_render_options(job: Job):
     """Resolve (music_path, target_volume_db, loop) for rendering.
 
     The reference's measured mean music loudness (music_volume_db) is the
-    target loudness the rendered track should land at â€” this is independent
+    target loudness the rendered track should land at Ã¢â‚¬â€ this is independent
     of WHICH music file is used. When the user supplies their own music_path
     we still want the rendered music to sit at the reference's loudness, so
     we pass the reference dB through as the target and let
