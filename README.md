@@ -47,8 +47,8 @@ All variables (defaults in `app/config.py`):
 | `LLM_FALLBACK_MODEL` | — | Optional second model tried if the primary fails |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Override if not on PATH |
 | `YTDLP_COOKIES_FILE` | — | Optional Netscape cookies.txt for YouTube reference downloads |
-| `YTDLP_COOKIES_FROM_BROWSER` | `chrome` | Browser cookie store fallback for yt-dlp |
-| `BROLL_LIBRARY_DIR` | `data/broll_library` | Local B-roll library (`app/broll.py` scans it recursively and tags every clip once, cached forever) |
+| `YTDLP_COOKIES_FROM_BROWSER` | — | Disabled; browser cookie scraping is not used |
+| `BROLL_LIBRARY_DIR` | `data/broll_library` | Legacy local library path; not used for B-roll sourcing |
 | `YOUTUBE_DATA_API_KEY` / `_2` | — | YouTube Data API v3 keys for B-roll search (key rotation on 403/429), falling back to yt-dlp ytsearch when unset/exhausted |
 | `BROLL_QUERY_MAX_WORDS` | `8` | Trims B-roll search queries to at most this many words |
 | `BROLL_LOCAL_MATCH_THRESHOLD` | `0.35` | Local-library match score floor (0..1); below this a span falls through to the YouTube rung |

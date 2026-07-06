@@ -21,17 +21,28 @@ logger = logging.getLogger(__name__)
 
 
 def _warm_frameio_library(settings: Settings) -> None:
-    """Background startup warm-up: sync the configured Frame.io share and
-    vision-tag its clips so the first Frame.io-sourced job doesn't pay the
+    """Background startup warm-up: sync the configured Frame.io share(s) and
+    vision-tag their clips so the first Frame.io-sourced job doesn't pay the
     whole download + index cost inside its own watchdog budget. Failures
     are logged, never fatal — the job path re-attempts the sync itself."""
     try:
         from app.broll import build_library_index
         from app.frameio_source import ensure_frameio_library
 
-        library_dir = ensure_frameio_library(settings.broll_frameio_share_url, settings)
-        build_library_index(settings, library_dir)
-        logger.info("Frame.io B-roll library warm-up complete: %s", library_dir)
+        library_dirs = []
+        for share_url in (
+            settings.broll_frameio_share_url.strip(),
+            settings.broll_frameio_share_url_2.strip(),
+        ):
+            if not share_url:
+                continue
+            try:
+                library_dirs.append(ensure_frameio_library(share_url, settings))
+            except Exception:
+                logger.exception("Frame.io share warm-up failed for %s (jobs will retry)", share_url)
+        if library_dirs:
+            build_library_index(settings, library_dirs)
+            logger.info("Frame.io B-roll library warm-up complete: %s", library_dirs)
     except Exception:
         logger.exception("Frame.io B-roll library warm-up failed (jobs will retry)")
 
@@ -151,7 +162,9 @@ def upload_job(
     broll_pack: bool = Form(False),
     enable_learned_broll: bool = Form(True),
     use_intelligent_selector: bool = Form(True),
+    add_caption: bool = Form(True),
     broll_source: str = Form("both"),
+    use_broll_frameio_2: bool = Form(False),
     pipeline: Pipeline = Depends(get_pipeline),
 ) -> JobSummary:
     try:
@@ -171,7 +184,9 @@ def upload_job(
             broll_pack=broll_pack,
             enable_learned_broll=enable_learned_broll,
             use_intelligent_selector=use_intelligent_selector,
+            add_caption=add_caption,
             broll_source=broll_source,
+            use_broll_frameio_2=use_broll_frameio_2,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

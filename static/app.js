@@ -24,9 +24,12 @@ const musicInput = document.getElementById("music");
 const brollPackCheckbox = document.getElementById("broll-pack");
 const enableLearnedBrollCheckbox = document.getElementById("enable-learned-broll");
 const useIntelligentSelectorCheckbox = document.getElementById("use-intelligent-selector");
+const addCaptionCheckbox = document.getElementById("add-caption");
 const brollSourceFrameio = document.getElementById("broll-source-frameio");
 const brollSourceYoutube = document.getElementById("broll-source-youtube");
 const brollSourceBoth = document.getElementById("broll-source-both");
+const brollFrameio2Row = document.getElementById("broll-frameio-2-row");
+const brollFrameio2Checkbox = document.getElementById("broll-frameio-2");
 
 replicateCheckbox.addEventListener("change", () => {
   replicateFields.hidden = !replicateCheckbox.checked;
@@ -38,12 +41,24 @@ replicateCheckbox.addEventListener("change", () => {
 brollSourceBoth.addEventListener("change", () => {
   brollSourceFrameio.checked = brollSourceBoth.checked;
   brollSourceYoutube.checked = brollSourceBoth.checked;
+  updateBrollFrameio2Visibility();
 });
 [brollSourceFrameio, brollSourceYoutube].forEach((box) => {
   box.addEventListener("change", () => {
     brollSourceBoth.checked = brollSourceFrameio.checked && brollSourceYoutube.checked;
+    updateBrollFrameio2Visibility();
   });
 });
+
+// The "Also search folder 2" checkbox only makes sense when the Frame.io
+// library rung is active (Frame.io or Both); hide it outright for the
+// YouTube-only case so the UI can't advertise a no-op. The unchecked state
+// is the default; toggling Frame.io back on restores the user's last choice.
+function updateBrollFrameio2Visibility() {
+  if (!brollFrameio2Row) return;
+  brollFrameio2Row.hidden = !(brollSourceFrameio.checked || brollSourceBoth.checked);
+}
+updateBrollFrameio2Visibility();
 
 function resolveBrollSource() {
   // null = nothing selected (validation error in the submit handler).
@@ -104,6 +119,14 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     data.append("broll_source", brollSource);
+    // Per-replicate-job opt-in to merge the secondary Frame.io share
+    // (BROLL_FRAMEIO_SHARE_URL_2) into this job's B-roll library. Ignored by
+    // the backend when YouTube-only is selected or when no secondary URL is
+    // configured, so the UI doesn't have to gate this on either condition.
+    data.append(
+      "use_broll_frameio_2",
+      brollFrameio2Checkbox.checked ? "true" : "false",
+    );
     data.append("reference_url", referenceUrlInput.value.trim());
     if (referenceInput.files[0]) {
       data.append("reference", referenceInput.files[0]);
@@ -124,6 +147,12 @@ form.addEventListener("submit", async (event) => {
       "use_intelligent_selector",
       useIntelligentSelectorCheckbox.checked ? "true" : "false",
     );
+    // Per-replicate-job caption toggle. Defaults to True so historical
+    // behavior is preserved; unchecked users get a title-only render.
+    data.append(
+      "add_caption",
+      addCaptionCheckbox.checked ? "true" : "false",
+    );
   }
 
   resetStatus("Uploading...", 0.05);
@@ -132,6 +161,7 @@ form.addEventListener("submit", async (event) => {
   try {
     const response = await fetch(`${API_BASE}/api/jobs/upload`, { method: "POST", body: data });
     const payload = await readResponse(response);
+    pollFailures = 0;
     pollTimer = setInterval(() => poll(payload.id), 1500);
   } catch (err) {
     showError(err.message);
@@ -147,10 +177,17 @@ function updateClipMode() {
   endInput.required = manual;
 }
 
+// Consecutive failed polls. A single "Failed to fetch" (e.g. the dev server
+// reloading after a code change) must NOT kill the poll loop permanently —
+// the job keeps running server-side. Only give up after several in a row.
+let pollFailures = 0;
+const MAX_POLL_FAILURES = 8;
+
 async function poll(jobId) {
   try {
     const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
     const job = await readResponse(response);
+    pollFailures = 0;
     progressFill.style.width = `${Math.round(job.progress * 100)}%`;
     statusText.textContent = `${job.status.toUpperCase()} - ${job.message}`;
     updateWarning(job.warning);
@@ -185,8 +222,12 @@ async function poll(jobId) {
       showError(job.error || job.message || "Job failed");
     }
   } catch (err) {
-    clearInterval(pollTimer);
-    showError(err.message);
+    pollFailures += 1;
+    if (pollFailures >= MAX_POLL_FAILURES) {
+      clearInterval(pollTimer);
+      showError(`Lost contact with the server (${err.message}). The job may still be running — refresh to check.`);
+    }
+    // Transient failure (server reload / brief network blip): keep polling.
   }
 }
 

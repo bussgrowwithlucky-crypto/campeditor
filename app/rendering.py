@@ -67,6 +67,7 @@ def render(
     music_path: Path | None = None,
     music_volume_db: float | None = None,
     music_loop: bool = True,
+    add_caption: bool = True,
 ) -> Path:
     duration = probe_duration(source_path, settings)
     if start < 0 or end <= start:
@@ -78,7 +79,7 @@ def render(
 
     ass_path = output_path.parent / "captions.ass"
     ass_path.write_text(
-        _build_ass(transcript, title, clip_duration),
+        _build_ass(transcript, title, clip_duration, add_caption=add_caption),
         encoding="utf-8",
     )
 
@@ -399,6 +400,7 @@ def _build_ass(
     transcript: Transcript,
     title: Title,
     clip_duration: float,
+    add_caption: bool = True,
 ) -> str:
     lines = [
         "[Script Info]",
@@ -441,10 +443,16 @@ def _build_ass(
             f"Dialogue: 1,0:00:00.00,{_ass_time(clip_duration)},Title,,0,0,0,,{title_text}"
         )
 
-    for cue_start, cue_end, cue_text in _caption_cues(transcript.words, clip_duration):
-        lines.append(
-            f"Dialogue: 0,{_ass_time(cue_start)},{_ass_time(cue_end)},Caption,,0,0,0,,{cue_text}"
-        )
+    # Caption burn-in is gated by the per-job add_caption flag. When False
+    # we still write the ASS file (the title needs the filter) but emit no
+    # caption Dialogue rows. This is the simplest correct way to skip just
+    # the caption step without disturbing the title overlay or the ffmpeg
+    # filter chain.
+    if add_caption:
+        for cue_start, cue_end, cue_text in _caption_cues(transcript.words, clip_duration):
+            lines.append(
+                f"Dialogue: 0,{_ass_time(cue_start)},{_ass_time(cue_end)},Caption,,0,0,0,,{cue_text}"
+            )
     return "\n".join(lines) + "\n"
 
 

@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     ffprobe_path: str = Field(default="ffprobe", validation_alias="FFPROBE_PATH")
     ytdlp_cookies_file: Path | None = Field(default=None, validation_alias="YTDLP_COOKIES_FILE")
     ytdlp_cookies_from_browser: str = Field(
-        default="chrome", validation_alias="YTDLP_COOKIES_FROM_BROWSER"
+        default="", validation_alias="YTDLP_COOKIES_FROM_BROWSER"
     )
     broll_library_dir: Path = Field(
         default=Path("data/broll_library"), validation_alias="BROLL_LIBRARY_DIR"
@@ -128,6 +128,15 @@ class Settings(BaseSettings):
     # library works on hosts (Render) that don't ship the local clip folder.
     broll_frameio_share_url: str = Field(
         default="", validation_alias="BROLL_FRAMEIO_SHARE_URL"
+    )
+    # Optional secondary Frame.io share that can be merged into the B-roll
+    # library for a single job when the user ticks the "Also search folder 2"
+    # checkbox in the render form. Empty (the default) hides the checkbox.
+    # Like the primary share, this gets synced into its own
+    # data/broll_frameio/<share_id>/ subdirectory and is searched alongside
+    # the primary mirror — never as a replacement.
+    broll_frameio_share_url_2: str = Field(
+        default="", validation_alias="BROLL_FRAMEIO_SHARE_URL_2"
     )
 
     # ---- YouTube search ----
@@ -189,5 +198,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.broll_library_dir.mkdir(parents=True, exist_ok=True)
     return settings

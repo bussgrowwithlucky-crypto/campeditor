@@ -1040,6 +1040,46 @@ def _folder_category(folder: str) -> str:
     return "other"
 
 
+_SEED_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "b", "best", "big", "roll",
+    "broll", "by", "clip", "clips", "compilation", "edit", "edits", "for",
+    "from", "full", "hd", "high", "hq", "in", "is", "of", "official", "on",
+    "quality", "rare", "short", "shorts", "the", "to", "video", "with",
+}
+
+
+def _seed_library_tags_from_path(path: Path, settings: Settings) -> dict:
+    """Cheap fallback tags from Frame.io folder/file names.
+
+    Frame.io libraries can contain hundreds of new clips. Vision-tagging every
+    uncached file inside a user job makes broll_recovery look hung; this seed
+    keeps matching usable immediately and lets already-cached vision tags win
+    whenever they exist.
+    """
+    text_parts = [path.parent.name, path.stem]
+    tokens: list[str] = []
+    for part in text_parts:
+        for token in re.findall(r"[A-Za-z0-9$]+", part.replace("_", " ")):
+            lowered = token.lower()
+            if len(lowered) < 2 or lowered in _SEED_STOPWORDS:
+                continue
+            if lowered not in tokens:
+                tokens.append(lowered)
+    query = _truncate_query(" ".join(tokens) or path.stem.replace("_", " "), settings)
+    subjects = tokens[:4]
+    category = "other"
+    for parent in path.parents:
+        category = _folder_category(parent.name)
+        if category != "other":
+            break
+    return {
+        "subjects": subjects,
+        "setting": [],
+        "category": category,
+        "query": query,
+    }
+
+
 def _extract_single_frame(source: Path, at_seconds: float, output_path: Path, settings: Settings) -> bool:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1086,24 +1126,33 @@ def _index_cache_path(settings: Settings) -> Path:
     return settings.data_dir / "cache" / "broll_index.json"
 
 
-def build_library_index(settings: Settings, library_dir: Path | None = None) -> list[LibraryClip]:
-    """Scan a B-roll library dir once, tag every new/changed file with
-    vision, and cache the result forever at data/cache/broll_index.json.
+def build_library_index(
+    settings: Settings, library_dir: "Path | list[Path] | None" = None
+) -> list[LibraryClip]:
+    """Scan one or more B-roll library dirs once, tag every new/changed file
+    with vision, and cache the result forever at data/cache/broll_index.json.
     Incremental: unchanged files (same mtime+size) are read straight from
     cache, so only new library additions pay the vision cost.
 
     `library_dir` defaults to settings.broll_library_dir (the machine-local
     clip folder); jobs whose broll_source is Frame.io pass the synced share
-    mirror instead. Cache entries are keyed by absolute path, so multiple
-    library dirs coexist in the one cache file."""
+    mirror(s) instead — a single Path or a list of Paths (primary + optional
+    secondary share) whose clips are merged into one searchable index. Cache
+    entries are keyed by absolute path, so multiple library dirs coexist in
+    the one cache file."""
     # One-shot purge of the frame-tag cache when the prompt version stamp is
     # older than the live setting. Runs BEFORE any clip re-tag so newly-tagged
     # frames always come from the current prompt. Idempotent — second call
     # with the same live version is a no-op.
     _maybe_purge_frame_tag_cache(settings)
     if library_dir is None:
-        library_dir = settings.broll_library_dir
-    if not library_dir.exists():
+        library_dirs = [settings.broll_library_dir]
+    elif isinstance(library_dir, (list, tuple)):
+        library_dirs = [Path(d) for d in library_dir]
+    else:
+        library_dirs = [library_dir]
+    library_dirs = [d for d in library_dirs if d.exists()]
+    if not library_dirs:
         return []
     cache_path = _index_cache_path(settings)
     cached: dict[str, dict] = {}
@@ -1115,7 +1164,16 @@ def build_library_index(settings: Settings, library_dir: Path | None = None) -> 
         except Exception:
             cached = {}
 
-    files = sorted(p for p in library_dir.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
+    files = sorted(
+        p
+        for d in library_dirs
+        for p in d.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+    )
+    frameio_fast_seed = any(
+        "broll_frameio" in {part.lower() for part in d.parts}
+        for d in library_dirs
+    )
     clips: list[LibraryClip] = []
     changed = False
     budget = _VisionBudget(None)  # uncapped: one-time build, deterministic call count, disk-cached forever
@@ -1151,8 +1209,12 @@ def build_library_index(settings: Settings, library_dir: Path | None = None) -> 
             continue
 
         folder = path.parent.name
-        tagged = {} if vision_disabled else _tag_library_clip(path, settings, budget)
-        if not vision_disabled:
+        tagged = (
+            _seed_library_tags_from_path(path, settings)
+            if frameio_fast_seed
+            else ({} if vision_disabled else _tag_library_clip(path, settings, budget))
+        )
+        if not vision_disabled and not frameio_fast_seed:
             if tagged.get("subjects") or tagged.get("query"):
                 consecutive_vision_failures = 0
             else:
@@ -1177,9 +1239,10 @@ def build_library_index(settings: Settings, library_dir: Path | None = None) -> 
             color_palette=tagged.get("color_palette", []),
         )
         clips.append(clip)
-        # Persist only successfully-tagged entries: an empty-tag entry written
-        # to the cache would never be retried once providers recover.
-        if tagged.get("subjects") or tagged.get("query"):
+        # Persist only successfully vision-tagged entries: a cheap filename
+        # seed written to the cache would never be upgraded once providers
+        # recover, while re-seeding Frame.io names is effectively free.
+        if (tagged.get("subjects") or tagged.get("query")) and not frameio_fast_seed:
             cached[key] = {
                 "mtime": stat.st_mtime, "size": stat.st_size,
                 "subjects": clip.subjects, "setting": clip.setting,
@@ -1525,6 +1588,39 @@ def _llm_pick_local(profile: SpanProfile, ranked_top: list[tuple[LibraryClip, fl
     return result_clip
 
 
+def _pick_local_from_ranked(
+    profile: SpanProfile,
+    ranked: list[tuple[LibraryClip, float, float, float, float]],
+    settings: Settings,
+) -> tuple[LibraryClip, float, float, float] | None:
+    """Pick a local clip from an already-computed ranking.
+
+    The ranker is deterministic and cheap compared with the 15s cloud LLM
+    tie-break. Trust clear top-ranked matches immediately; ask the LLM only
+    when the top candidates are close enough that it can materially change
+    the result.
+    """
+    if not ranked:
+        return None
+    top = ranked[:5]
+    best_clip, best_score, best_vibe, _best_cinema, best_cont = top[0]
+    runner_up_score = top[1][1] if len(top) > 1 else 0.0
+    confident_best = (
+        best_score >= settings.broll_local_match_threshold + 0.10
+        or best_score >= runner_up_score + 0.05
+    )
+    if not confident_best:
+        picked = _llm_pick_local(profile, top, settings)
+        if picked is not None:
+            for clip, total, vibe, _cinema, cont in ranked:
+                if clip is picked:
+                    return clip, vibe, cont, total
+            return picked, 0.0, 0.0, 0.0
+    if best_score >= settings.broll_local_match_threshold:
+        return best_clip, best_vibe, best_cont, best_score
+    return None
+
+
 def match_local(
     profile: SpanProfile,
     index: list[LibraryClip],
@@ -1571,26 +1667,7 @@ def match_local(
     )
     if not ranked:
         return None
-    top = ranked[:5]
-    best_clip, best_score, best_vibe, _best_cinema, best_cont = top[0]
-    runner_up_score = top[1][1] if len(top) > 1 else 0.0
-    skip_llm = (
-        best_score >= settings.broll_local_match_threshold
-        and best_score >= runner_up_score + 0.15
-    )
-    if not skip_llm:
-        picked = _llm_pick_local(profile, top, settings)
-        if picked is not None:
-            # Look the picked clip back up to recover its vibe + continuity
-            # + total score (so _gather_span_pool can decide whether to skip
-            # the YouTube rung).
-            for clip, total, vibe, _cinema, cont in ranked:
-                if clip is picked:
-                    return clip, vibe, cont, total
-            return picked, 0.0, 0.0, 0.0
-    if best_score >= settings.broll_local_match_threshold:
-        return best_clip, best_vibe, best_cont, best_score
-    return None
+    return _pick_local_from_ranked(profile, ranked, settings)
 
 
 # ---------------------------------------------------------------------------
@@ -1605,8 +1682,6 @@ def _ytdlp_cookie_args(settings: Settings) -> list[str]:
     cookies_file = settings.ytdlp_cookies_file
     if cookies_file and cookies_file.exists():
         return ["--cookies", str(cookies_file)]
-    if settings.ytdlp_cookies_from_browser.strip() and not _BROWSER_COOKIES_BROKEN:
-        return ["--cookies-from-browser", settings.ytdlp_cookies_from_browser.strip()]
     return []
 
 
@@ -2179,19 +2254,41 @@ def _gather_span_pool(
     if used_clips_lock is None:
         used_clips_lock = threading.Lock()
 
+    # Rank + LLM tie-break run OUTSIDE the lock against a snapshot of
+    # used_clips, so concurrent spans' cloud LLM calls (up to ~15s each)
+    # overlap instead of serializing behind one mutex — previously an
+    # N-span job paid N sequential LLM round-trips here. The pick is then
+    # re-validated and committed UNDER the lock; if a sibling span grabbed
+    # the same clip in the meantime, the next-best unused ranked candidate
+    # above the match threshold takes its place, so no two spans can still
+    # commit the same clip.
     with used_clips_lock:
-        ranked_local = _rank_local(
-            profile, library_index, used_clips, intelligent=intelligent,
-            reference_house=reference_house, job_id=job_id, ledger=ledger,
-        )
-        if ranked_local:
-            picked_result = match_local(
-                profile, library_index, used_clips, settings,
-                intelligent=intelligent, reference_house=reference_house,
-                job_id=job_id, ledger=ledger,
-            )
+        used_snapshot = set(used_clips)
+    ranked_local = _rank_local(
+        profile, library_index, used_snapshot, intelligent=intelligent,
+        reference_house=reference_house, job_id=job_id, ledger=ledger,
+    )
+    picked_result = None
+    if ranked_local:
+        picked_result = _pick_local_from_ranked(profile, ranked_local, settings)
+
+    with used_clips_lock:
+        if picked_result is not None:
+            picked, picked_vibe, picked_cont, picked_score = picked_result
+            if picked.path.resolve() in used_clips:
+                # Race lost: a sibling span committed this clip while our
+                # LLM call was in flight. Fall back to the best-ranked
+                # unused candidate that still clears the threshold.
+                picked_result = None
+                for clip, score, vibe, _cinema, cont in ranked_local:
+                    if score < settings.broll_local_match_threshold:
+                        break  # ranked desc — nothing below qualifies
+                    if clip.path.resolve() in used_clips:
+                        continue
+                    picked, picked_vibe, picked_cont, picked_score = clip, vibe, cont, score
+                    picked_result = (clip, vibe, cont, score)
+                    break
             if picked_result is not None:
-                picked, picked_vibe, picked_cont, picked_score = picked_result
                 # Look up the cinema score for the picked clip from the
                 # ranking output (we already computed it once).
                 picked_cinema = 0.0
@@ -2218,8 +2315,11 @@ def _gather_span_pool(
                     if clip.path.resolve() == picked.path.resolve():
                         continue
                     # Reserve alternate inside the lock too — otherwise a
-                    # concurrent span could pick the same alternate.
+                    # concurrent span could pick the same alternate. Skip
+                    # anything a sibling committed since our snapshot.
                     resolved = clip.path.resolve()
+                    if resolved in used_clips:
+                        continue
                     used_clips.add(resolved)
                     pool.append((
                         clip.path, "local",
@@ -2296,7 +2396,7 @@ def fetch_broll_cut_variations(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
-    library_dir: Path | None = None,
+    library_dir: "Path | list[Path] | None" = None,
     use_library: bool = True,
     use_youtube: bool = True,
     youtube_errors: list[str] | None = None,
@@ -2459,7 +2559,7 @@ def fetch_hook_broll(
     hook_duration: float,
     work_dir: Path,
     settings: Settings,
-    library_dir: Path | None = None,
+    library_dir: "Path | list[Path] | None" = None,
 ) -> Path | None:
     """Find a local library B-roll matching the reference's hook tags.
 
@@ -2558,7 +2658,7 @@ def fetch_broll_cuts(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
-    library_dir: Path | None = None,
+    library_dir: "Path | list[Path] | None" = None,
     use_library: bool = True,
     use_youtube: bool = True,
     youtube_errors: list[str] | None = None,
@@ -2707,7 +2807,7 @@ def gather_broll_pack(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
-    library_dir: Path | None = None,
+    library_dir: "Path | list[Path] | None" = None,
     use_library: bool = True,
     use_youtube: bool = True,
     youtube_errors: list[str] | None = None,

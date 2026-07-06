@@ -55,6 +55,10 @@
             <label class="radio"><input type="checkbox" id="broll-source-frameio" checked> Frame.io folder</label>
             <label class="radio"><input type="checkbox" id="broll-source-youtube" checked> YouTube</label>
             <label class="radio"><input type="checkbox" id="broll-source-both" checked> Both</label>
+            <label class="radio pack" id="broll-frameio-2-row" hidden>
+              <input type="checkbox" id="broll-frameio-2">
+              <span>Also search folder 2 &mdash; merge the secondary Frame.io share into this job&rsquo;s B-roll library (searched alongside the primary folder, never replacing it).</span>
+            </label>
           </fieldset>
           <label class="radio pack">
             <input type="checkbox" id="broll-pack">
@@ -63,6 +67,10 @@
           <label class="radio pack">
             <input type="checkbox" id="use-intelligent-selector" checked>
             <span>Intelligent B-roll AI &mdash; boost candidates whose <em>vibe</em>, lighting, and shot type match the reference (slows the job a little, but picks B-roll that looks like the reference instead of just matching keywords).</span>
+          </label>
+          <label class="radio pack">
+            <input type="checkbox" id="add-caption" checked>
+            <span>Add caption &mdash; burn the transcribed 3-word cues into the rendered video. Uncheck for a title-only render.</span>
           </label>
         </div>
       </fieldset>

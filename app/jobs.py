@@ -13,8 +13,6 @@ from app.config import Settings
 from app.models import ClipMode, ColorGrade, Job, JobStatus, Title, TitleMode
 from app.rendering import probe_duration, render
 from app.broll_profile import (
-    load_broll_profile,
-    synthesize_broll_spans,
     update_broll_profile_atomic,
 )
 from app.broll import (
@@ -23,7 +21,6 @@ from app.broll import (
     fetch_broll_cuts,
     fetch_broll_cut_variations,
     fetch_hook_broll,
-    fetch_learned_broll_cuts,
     gather_broll_pack,
 )
 from app.frameio_source import ensure_frameio_library
@@ -40,7 +37,7 @@ def _job_broll_span_count(job: Job) -> int:
     """Number of B-roll spans detected in the job's reference analysis.
 
     Used to scale the broll_recovery stage prior in ETA forecasting. Returns 0
-    when the reference has not been analyzed yet (early stages) — the ETA
+    when the reference has not been analyzed yet (early stages) â€” the ETA
     scaler then falls back to a single-span prior, which is a safe
     underestimate."""
     reference = getattr(job, "reference", None)
@@ -58,8 +55,8 @@ class Pipeline:
     # How long a non-terminal job may go without meta.json being updated
     # before the watchdog kills it. INGESTED jobs that don't advance within
     # this window are typically a sign that the executor silently dropped
-    # the future — better to surface a clear failure than spin forever.
-    # Raised from 120s → 900s because the per-job heartbeat thread is a
+    # the future â€” better to surface a clear failure than spin forever.
+    # Raised from 120s â†’ 900s because the per-job heartbeat thread is a
     # Python thread blocked on the GIL while the worker runs CPU-bound code
     # inside fetch_broll_cuts / fetch_broll_cut_variations (5-10 min on a
     # full reference), so mtime can legitimately go stale for minutes even
@@ -72,7 +69,7 @@ class Pipeline:
     # the watchdog can distinguish "worker actively running" from "worker
     # silently dropped the future".
     WORKER_HEARTBEAT_SECONDS: float = 30.0
-    # Per-stage stuck-job timeout. broll_recovery is the long pole — its
+    # Per-stage stuck-job timeout. broll_recovery is the long pole â€” its
     # ETA forecast alone is up to ~600s and on slow cloud vision calls it
     # can run significantly longer. Keep the early stages on the global
     # default (900s) so a stuck INGESTED/ANALYZING job is still caught.
@@ -103,11 +100,17 @@ class Pipeline:
         # logs a full ERROR traceback every WATCHDOG_POLL_INTERVAL_SECONDS
         # forever.
         self._watchdog_unrecoverable: set[str] = set()
+        # True while shutdown() runs: lets the JobCancelled handler tell a
+        # server-restart apart from a real user cancel, so interrupted jobs
+        # stay non-terminal and get resumed on the next startup instead of
+        # being mislabelled "Cancelled by user".
+        self._shutting_down = False
         self._watchdog_stop = Event()
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_loop, daemon=True, name="pipeline-watchdog",
         )
         self._watchdog_thread.start()
+        self._resume_interrupted_jobs()
 
     def create_job(
         self,
@@ -126,7 +129,9 @@ class Pipeline:
         broll_pack: bool = False,
         enable_learned_broll: bool = True,
         use_intelligent_selector: bool = True,
+        add_caption: bool = True,
         broll_source: str = "both",
+        use_broll_frameio_2: bool = False,
     ) -> Job:
         broll_source = (broll_source or "both").strip().lower()
         if broll_source not in ("frameio", "youtube", "both"):
@@ -189,10 +194,21 @@ class Pipeline:
         # score. Only the B-roll ladder reads this; non-replicate jobs
         # ignore it.
         job.use_intelligent_selector = bool(use_intelligent_selector)
+        # add_caption gates the ASS caption burn-in for replicate jobs.
+        # Defaults to True to preserve historical behavior; unchecked users
+        # get a title-only render. Transcription still runs (the title +
+        # B-roll queries depend on it) â€” only the burn-in step is skipped.
+        job.add_caption = bool(add_caption)
         # Where span B-roll may come from (replicate jobs): the synced
         # Frame.io share, YouTube search, or both. Reference-crop stays the
         # guaranteed fallback in every mode.
         job.broll_source = broll_source
+        # Per-job opt-in to merge a secondary Frame.io share (configured at
+        # the server via BROLL_FRAMEIO_SHARE_URL_2) into this job's B-roll
+        # library. Persisted on the Job so audit rows can surface which
+        # jobs pulled from the secondary share, and so a re-run picks up the
+        # same flag from meta.json.
+        job.use_broll_frameio_2 = bool(use_broll_frameio_2)
         job.status = JobStatus.INGESTED
         job.progress = 0.1
         job.message = "Upload received"
@@ -332,6 +348,9 @@ class Pipeline:
             event.set()
 
     def shutdown(self) -> None:
+        # Mark BEFORE tripping the events so workers that bail out with
+        # JobCancelled know this is a restart, not a user cancel.
+        self._shutting_down = True
         # Stop the watchdog first so it doesn't race against the executor
         # teardown on the same job metadata.
         self._watchdog_stop.set()
@@ -340,6 +359,45 @@ class Pipeline:
         for event in self.job_events.values():
             event.set()
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+    # Interrupted jobs younger than this are resubmitted at startup;
+    # anything older is left alone (stale experiments, not active work).
+    RESUME_MAX_AGE_SECONDS: float = 24 * 3600
+
+    def _resume_interrupted_jobs(self) -> None:
+        """Resubmit every recent non-terminal job found on disk at startup.
+
+        A server restart (deploy, --reload, Ctrl+C) used to strand running
+        jobs: shutdown() cancelled them and they surfaced as FAILED
+        "Cancelled by user" even though nobody cancelled anything. Now the
+        JobCancelled handler leaves restart-interrupted jobs non-terminal,
+        and this sweep re-runs them from the top. The re-run is fast where
+        it matters: reference analysis, Frame.io sync, the library index,
+        and vision tags are all disk-cached, so a job that died at the
+        B-roll stage gets back there in seconds."""
+        terminal = {JobStatus.READY, JobStatus.FAILED}
+        now = time.time()
+        try:
+            job_dirs = list(self.store.jobs_dir.iterdir())
+        except OSError:
+            return
+        for job_dir in job_dirs:
+            meta_path = job_dir / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                if now - meta_path.stat().st_mtime > self.RESUME_MAX_AGE_SECONDS:
+                    continue
+                job = self.store.get(job_dir.name)
+            except Exception:
+                continue
+            if job.status in terminal or job.id in self.job_futures:
+                continue
+            job.message = "Resumed after server restart"
+            self.store.save(job)
+            self.job_events[job.id] = Event()
+            self.job_futures[job.id] = self.executor.submit(self._run, job.id)
+            logger.info("Resumed interrupted job %s (was %s)", job.id, job.status.value)
 
     def _run(self, job_id: str) -> None:
         # Load the job + cancellation event INSIDE the try block. Any
@@ -375,7 +433,7 @@ class Pipeline:
             logger.exception("Could not bump mtime at start of job %s", job_id)
         # Heartbeat thread: keep meta.json's mtime fresh during long stages
         # by re-saving every WORKER_HEARTBEAT_SECONDS. The watchdog uses
-        # this signal to know the worker is still alive — without it, jobs
+        # this signal to know the worker is still alive â€” without it, jobs
         # in broll_recovery (5-10 min) get killed mid-stage because their
         # meta.json looks stale. Cheap: just a disk stat + write of ~1KB.
         stop_heartbeat = Event()
@@ -393,12 +451,12 @@ class Pipeline:
         try:
             # Folder jobs auto-discover source_path later; all other jobs
             # require a pre-uploaded raw video. Only fail when BOTH are
-            # missing — a normal upload job legitimately has an empty
+            # missing â€” a normal upload job legitimately has an empty
             # frameio_source_url but a set source_path.
             if not job.frameio_source_url and job.source_path is None:
                 raise ValueError(
                     f"Job {job.id} has no source video uploaded and is not a "
-                    "Frame.io folder job — cannot run."
+                    "Frame.io folder job â€” cannot run."
                 )
             work_dir = self.store.job_dir(job.id)
             job.stage_started_at = time.time()
@@ -408,42 +466,35 @@ class Pipeline:
                 job.reference_path = download_reference(job.reference_url, work_dir, self.settings)
                 self.store.save(job)
 
-            # B-roll source gating (job.broll_source): resolved once here and
-            # reused by the hook fetch + every broll_recovery rung below.
+            # B-roll source gating (job.broll_source): only the cheap mode
+            # booleans are resolved here. The actual Frame.io sync (folder 1
+            # + optional folder 2) is DEFERRED to the B-roll stage further
+            # down so the visible pipeline keeps its historical order:
+            # upload -> analyzing -> transcribing -> titling -> b-roll ->
+            # rendering. (Syncing at INGESTED made "Syncing Frame.io
+            # B-roll library" appear as step 2, before analysis.)
             # - "frameio": library rung reads the synced Frame.io share
-            #   mirror ONLY; YouTube rung disabled.
+            #   mirror(s) ONLY; YouTube rung disabled.
             # - "youtube": library rung disabled; YouTube rung on.
-            # - "both": Frame.io mirror when a share URL is configured
-            #   (falling back to the machine-local library otherwise) +
-            #   YouTube rung on.
+            # - "both": Frame.io mirror(s) + YouTube rung on. Never fall
+            #   back to the machine-local B-roll folder.
             broll_source_mode = (getattr(job, "broll_source", "both") or "both").lower()
             broll_use_library = broll_source_mode in ("frameio", "both")
             broll_use_youtube = broll_source_mode in ("youtube", "both")
-            broll_library_dir: Path | None = None  # None = settings.broll_library_dir
+            # None = no library rung; a list = synced Frame.io mirror dirs
+            # (folder 1 [+ folder 2]) merged into one index.
+            broll_library_dir: Path | list[Path] | None = None
             youtube_errors: list[str] = []
-            if job.replicate and broll_use_library:
-                share_url = self.settings.broll_frameio_share_url.strip()
-                if share_url:
-                    try:
-                        self._advance(
-                            job, cancellation, JobStatus.INGESTED, 0.13,
-                            "Syncing Frame.io B-roll library",
-                        )
-                        broll_library_dir = ensure_frameio_library(share_url, self.settings)
-                    except Exception as exc:
-                        if broll_source_mode == "frameio":
-                            raise ValueError(
-                                f"Frame.io B-roll source is not working: {exc}"
-                            ) from exc
-                        # both-mode: degrade to the machine-local library and
-                        # surface the problem without failing the job.
-                        job.warning = f"Frame.io B-roll library unavailable ({exc}); used local library."
-                        logger.warning("Frame.io B-roll sync failed; falling back to local library", exc_info=True)
-                elif broll_source_mode == "frameio":
-                    raise ValueError(
-                        "Frame.io B-roll source selected but no share URL is configured "
-                        "(set BROLL_FRAMEIO_SHARE_URL)"
-                    )
+            # Fail fast on impossible configuration (before any heavy work).
+            if (
+                job.replicate
+                and broll_source_mode == "frameio"
+                and not self.settings.broll_frameio_share_url.strip()
+            ):
+                raise ValueError(
+                    "Frame.io B-roll source selected but no share URL is configured "
+                    "(set BROLL_FRAMEIO_SHARE_URL)"
+                )
 
             if job.replicate and job.reference_path:
                 self._advance(job, cancellation, JobStatus.ANALYZING, 0.15, "Analyzing reference short")
@@ -456,37 +507,7 @@ class Pipeline:
                     # same on-disk state and silently overwrite each other.
                     update_broll_profile_atomic(self.settings, job.reference)
 
-                # Hook replication: the reference's first 0.5-3.5s of
-                # music-over-broll is captured in job.reference.hook_span +
-                # hook_tags. Prepend a matching library clip so the rendered
-                # short opens with the same kind of hook. Failure here is
-                # non-fatal — the regular broll_recovery ladder still
-                # produces the rest of the cuts. Skipped in youtube-only
-                # mode (the hook is a library feature).
-                if (
-                    broll_use_library
-                    and job.reference
-                    and job.reference.hook_span
-                    and job.reference.hook_tags
-                ):
-                    hook_start, hook_end = job.reference.hook_span
-                    hook_dur = max(0.0, hook_end - hook_start)
-                    if hook_dur > 0:
-                        try:
-                            hook_clip = fetch_hook_broll(
-                                job.reference.hook_tags,
-                                hook_dur,
-                                work_dir / "hook",
-                                self.settings,
-                                library_dir=broll_library_dir,
-                            )
-                            if hook_clip is not None:
-                                job.hook_clip_path = hook_clip
-                                job.hook_span = (0.0, hook_dur)
-                        except Exception:
-                            logger.exception("Hook B-roll fetch failed")
-
-            # ── Auto source-finding from Frame.io folder ─────────────
+            # â”€â”€ Auto source-finding from Frame.io folder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if job.frameio_source_url and job.reference_path:
                 self._advance(
                     job, cancellation, JobStatus.ANALYZING, 0.18,
@@ -514,7 +535,7 @@ class Pipeline:
                 job.end = raw_end
                 job.clip_mode = ClipMode.MANUAL  # timestamps already set
                 job.message = (
-                    f"Found source: {source_path.name} @ [{raw_start:.1f}s–{raw_end:.1f}s] "
+                    f"Found source: {source_path.name} @ [{raw_start:.1f}sâ€“{raw_end:.1f}s] "
                     f"(score={match_score:.2f})"
                 )
                 self.store.save(job)
@@ -530,31 +551,8 @@ class Pipeline:
                     job.message = "No speech detected - rendering without captions"
                     self.store.save(job)
 
-            if (
-                not job.replicate
-                and self.settings.broll_learning_enabled
-                and job.enable_learned_broll
-            ):
-                clip_dur = job.end - job.start
-                learned_spans = synthesize_broll_spans(
-                    load_broll_profile(self.settings), clip_dur
-                )
-                if learned_spans and job.source_path:
-                    self._advance(
-                        job, cancellation, JobStatus.RENDERING, 0.68, "Adding learned B-roll"
-                    )
-                    # Learned (no-reference) mode: no house style, but the
-                    # continuity ledger is still on so consecutive picks
-                    # pay the diversity tax (SPEC §9). The ledger is reset
-                    # implicitly on first use because this is a fresh
-                    # ContinuityLedger instance per job.
-                    learned_ledger = ContinuityLedger(max_history=2)
-                    job.broll_cuts = fetch_learned_broll_cuts(
-                        job.source_path, learned_spans, clip_dur, work_dir / "broll", self.settings,
-                        intelligent=getattr(job, "use_intelligent_selector", True),
-                        ledger=learned_ledger,
-                    )
-                    self.store.save(job)
+            # Learned local B-roll is disabled. B-roll sourcing is limited to
+            # Frame.io shares and YouTube.
 
             self._advance(job, cancellation, JobStatus.TITLING, 0.6, "Writing title")
             job.title = self._make_title(job)
@@ -566,7 +564,7 @@ class Pipeline:
             #
             # broll_pack forces variation_count = 1: in replicate mode every
             # variation shares one title, so the only thing that would differ
-            # across renders is the B-roll source clips — and when broll_pack
+            # across renders is the B-roll source clips â€” and when broll_pack
             # is on those clips are exported separately rather than inserted,
             # so multiple renders would be byte-identical files. One render is
             # the correct output.
@@ -575,6 +573,91 @@ class Pipeline:
             else:
                 variation_count = 1 if job.bulk else max(1, self.settings.variation_count)
 
+            # â”€â”€ B-roll library preparation (deferred Frame.io sync) â”€â”€â”€â”€â”€â”€â”€
+            # Runs AFTER titling so the stage order the user sees stays
+            # upload -> analyzing -> transcribing -> titling -> b-roll.
+            # Under BROLL_RECOVERY so the watchdog grants the long-stage
+            # budget (a first-time share download can take many minutes).
+            if job.replicate and job.reference and broll_use_library:
+                frameio_dirs: list[Path] = []
+                share_url = self.settings.broll_frameio_share_url.strip()
+                if share_url:
+                    try:
+                        self._advance(
+                            job, cancellation, JobStatus.BROLL_RECOVERY, 0.65,
+                            "Preparing B-roll library (Frame.io folder 1)",
+                        )
+                        frameio_dirs.append(ensure_frameio_library(share_url, self.settings))
+                    except JobCancelled:
+                        raise
+                    except Exception as exc:
+                        if broll_source_mode == "frameio":
+                            raise ValueError(
+                                f"Frame.io B-roll source is not working: {exc}"
+                            ) from exc
+                        # both-mode: keep YouTube as the only remaining
+                        # external source. Never fall back to local files.
+                        broll_use_library = False
+                        job.warning = f"Frame.io B-roll library unavailable ({exc}); used YouTube only."
+                        logger.warning("Frame.io B-roll sync failed; continuing with YouTube only", exc_info=True)
+                # Optional secondary share (BROLL_FRAMEIO_SHARE_URL_2),
+                # toggled per-job via the "Also search folder 2" checkbox.
+                # Its mirror is MERGED into the same searchable index as
+                # folder 1 â€” the matcher sees one combined library.
+                use_secondary = bool(getattr(job, "use_broll_frameio_2", False))
+                secondary_url = self.settings.broll_frameio_share_url_2.strip()
+                if use_secondary and secondary_url:
+                    try:
+                        self._advance(
+                            job, cancellation, JobStatus.BROLL_RECOVERY, 0.66,
+                            "Preparing B-roll library (Frame.io folder 2)",
+                        )
+                        frameio_dirs.append(ensure_frameio_library(secondary_url, self.settings))
+                    except JobCancelled:
+                        raise
+                    except Exception as exc:
+                        if broll_source_mode == "frameio" and not frameio_dirs:
+                            raise ValueError(
+                                f"Frame.io B-roll source 2 is not working: {exc}"
+                            ) from exc
+                        job.warning = (
+                            (job.warning + " " if job.warning else "")
+                            + f"Frame.io folder 2 unavailable ({exc}); searched folder 1 only."
+                        )
+                        logger.warning(
+                            "Frame.io secondary sync failed; continuing without folder 2",
+                            exc_info=True,
+                        )
+                if frameio_dirs:
+                    broll_library_dir = frameio_dirs
+                else:
+                    broll_use_library = False
+
+                # Hook replication: the reference's first 0.5-3.5s of
+                # music-over-broll is captured in job.reference.hook_span +
+                # hook_tags. Prepend a matching library clip so the rendered
+                # short opens with the same kind of hook. Failure here is
+                # non-fatal â€” the regular broll_recovery ladder still
+                # produces the rest of the cuts. Skipped in youtube-only
+                # mode (the hook is a library feature).
+                if broll_use_library and job.reference.hook_span and job.reference.hook_tags:
+                    hook_start, hook_end = job.reference.hook_span
+                    hook_dur = max(0.0, hook_end - hook_start)
+                    if hook_dur > 0:
+                        try:
+                            hook_clip = fetch_hook_broll(
+                                job.reference.hook_tags,
+                                hook_dur,
+                                work_dir / "hook",
+                                self.settings,
+                                library_dir=broll_library_dir,
+                            )
+                            if hook_clip is not None:
+                                job.hook_clip_path = hook_clip
+                                job.hook_span = (0.0, hook_dur)
+                        except Exception:
+                            logger.exception("Hook B-roll fetch failed")
+
             broll_cut_lists: list[list] = [job.broll_cuts]
             if job.replicate and job.reference and job.reference.broll_spans:
                 span_count = len(job.reference.broll_spans)
@@ -582,10 +665,10 @@ class Pipeline:
                 # Compute reference_house_style ONCE per job (before the
                 # first B-roll rung) so per-span scoring can back-fill
                 # empty span vibe fields from a stable per-job aggregate
-                # (SPEC §8). This is the SAME aggregate for the pack path
+                # (SPEC Â§8). This is the SAME aggregate for the pack path
                 # AND the variations path, so they're consistent.
                 reference_house = build_reference_house_style(job.reference)
-                # ContinuityLedger per job (SPEC §9): every fetch_* call
+                # ContinuityLedger per job (SPEC Â§9): every fetch_* call
                 # below shares this instance so consecutive span picks pay
                 # the diversity tax. The ledger's internal history is
                 # reset at the start of each variation inside
@@ -688,7 +771,7 @@ class Pipeline:
                         "cookie box or switch the B-roll source."
                     )
                 job.warning = (
-                    f"YouTube B-roll source had problems ({unique_errors[0]}) — "
+                    f"YouTube B-roll source had problems ({unique_errors[0]}) â€” "
                     "B-roll came from the library/Frame.io rung."
                 )
                 self.store.save(job)
@@ -750,6 +833,7 @@ class Pipeline:
                     music_path=music_path,
                     music_volume_db=music_volume_db,
                     music_loop=music_loop,
+                    add_caption=getattr(job, "add_caption", True),
                 )
 
                 from app.models import Variation
@@ -781,10 +865,17 @@ class Pipeline:
                 )
             self.store.save(job)
         except JobCancelled:
-            job.status = JobStatus.FAILED
-            job.message = "Cancelled"
-            job.error = "Cancelled by user"
-            self.store.save(job)
+            if self._shutting_down:
+                # Server restart, not a user action: keep the job
+                # non-terminal so _resume_interrupted_jobs re-runs it on
+                # the next startup. Cached stages make the re-run cheap.
+                job.message = "Interrupted by server restart â€” resumes automatically"
+                self.store.save(job)
+            else:
+                job.status = JobStatus.FAILED
+                job.message = "Cancelled"
+                job.error = "Cancelled by user"
+                self.store.save(job)
         except Exception as exc:
             logger.exception("Job %s failed", job_id)
             job.status = JobStatus.FAILED
@@ -813,7 +904,7 @@ class Pipeline:
             # cover it.
             self.job_futures.pop(job_id, None)
 
-    # ── ETA estimation ──────────────────────────────────────────────
+    # â”€â”€ ETA estimation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Empirical stage durations (seconds) used as priors when no historical
     # stage_timings are available.  These are tuned to a typical 20s reference
     # with 8 B-roll spans on a mid-range GPU.  The _advance helper refines
@@ -828,7 +919,7 @@ class Pipeline:
         "broll_recovery": 180.0,  # scaled by span count below
         "rendering": 35.0,
     }
-    # Ordered pipeline for ETA forecasting (last → first = remaining stages).
+    # Ordered pipeline for ETA forecasting (last â†’ first = remaining stages).
     _STAGE_ORDER: list[str] = [
         "ingested", "analyzing", "transcribing", "selecting",
         "titling", "broll_recovery", "rendering",
@@ -839,7 +930,7 @@ class Pipeline:
 
         Uses a two-signal approach:
           1. If we've already completed at least one stage, use its *actual*
-             elapsed time (stage_timings) as the anchor — better than the
+             elapsed time (stage_timings) as the anchor â€” better than the
              static prior.
           2. For stages not yet reached, fall back to the static prior,
              scaled by clip_duration (longer clips need proportionally more
@@ -858,7 +949,7 @@ class Pipeline:
         except ValueError:
             return 0.0
 
-        # Per-job active stage list — manual-mode jobs skip the SELECTING
+        # Per-job active stage list â€” manual-mode jobs skip the SELECTING
         # stage entirely (they go straight from TRANSCRIBING to TITLING), and
         # the "selecting" prior was inflating manual-mode ETA forecasts by ~2s
         # for no reason. Future per-job exclusions should land here.
@@ -879,7 +970,7 @@ class Pipeline:
                 # spans detected in the reference (each span needs ~180s of
                 # ytsearch + ffmpeg scoring). Cap at the REAL worst-case ceiling
                 # derived from the configured recovery budget (was a hardcoded
-                # 3600.0 — stale as soon as BROLL_RECOVERY_BUDGET_SECONDS is
+                # 3600.0 â€” stale as soon as BROLL_RECOVERY_BUDGET_SECONDS is
                 # changed, e.g. to 180 for a fast render, which used to forecast
                 # a wildly wrong ~17 minutes even though the pipeline itself was
                 # bounded to a few minutes).
@@ -929,7 +1020,7 @@ class Pipeline:
         enforced deadline.
 
         With the 4-way parallel span sourcing in app.broll, wall-clock is
-        closer to (longest span × ceil(spans / 4)) than to (per-span × spans);
+        closer to (longest span Ã— ceil(spans / 4)) than to (per-span Ã— spans);
         10 min is a still-conservative upper bound that doesn't overshoot 8-span
         jobs AND doesn't pretend they'll hit the old 15 min sequential ceiling.
         """
@@ -963,12 +1054,12 @@ class Pipeline:
         Two legitimate scenarios produce stale mtimes with an alive worker:
           1. The job is queued behind another job in the executor's task
              queue (worker_count < concurrent submissions). The future is
-             PENDING — `future.running()` is False and `future.done()` is
+             PENDING â€” `future.running()` is False and `future.done()` is
              False.
           2. The job is mid-stage in a long-running operation (broll_recovery
              can run 5-10 min). The heartbeat thread in _run keeps mtime
              fresh, but only every WORKER_HEARTBEAT_SECONDS.
-        In both cases we skip — killing them would just generate false
+        In both cases we skip â€” killing them would just generate false
         positives for jobs that would have completed successfully.
         """
         now = time.time()
@@ -983,7 +1074,7 @@ class Pipeline:
             except OSError:
                 continue
             if mtime >= cutoff:
-                continue  # recently touched — probably still progressing
+                continue  # recently touched â€” probably still progressing
             if job_dir.name in self._watchdog_unrecoverable:
                 continue  # already logged once; won't fix itself, don't retry forever
             try:
@@ -995,7 +1086,7 @@ class Pipeline:
                 job_id = data.get("id") or job_dir.name
                 # Cross-check the future state. If the worker is still
                 # alive (running or queued in the executor), the stale mtime
-                # is either queueing latency or a missing heartbeat tick —
+                # is either queueing latency or a missing heartbeat tick â€”
                 # NOT a dropped future. Bail out and let the next sweep
                 # decide once the heartbeat has caught up.
                 future = self.job_futures.get(job_id)
@@ -1003,7 +1094,7 @@ class Pipeline:
                     if future.running() or not future.done():
                         # Worker is alive (executing or queued). Skip.
                         continue
-                    # Future is done with no exception → worker completed
+                    # Future is done with no exception â†’ worker completed
                     # cleanly but somehow the job isn't in a terminal state.
                     # That's a real bug (missing READY/FAILED save) and
                     # deserves the watchdog kill.
@@ -1015,7 +1106,7 @@ class Pipeline:
                     status_str or "", self.STUCK_JOB_TIMEOUT_SECONDS,
                 )
                 if mtime >= now - stage_timeout:
-                    # Still within the per-stage window — give it more time.
+                    # Still within the per-stage window â€” give it more time.
                     continue
                 # Trip the cancellation event so a still-running worker
                 # (race between the future.running() check above and now)
@@ -1033,7 +1124,7 @@ class Pipeline:
                 job.message = "Job failed"
                 job.error = (
                     f"Job did not advance within "
-                    f"{stage_timeout:.0f}s in stage '{status_str}' — the "
+                    f"{stage_timeout:.0f}s in stage '{status_str}' â€” the "
                     "worker thread likely dropped the task. Restart the "
                     "server and resubmit."
                 )[-1000:]
@@ -1139,7 +1230,7 @@ def _music_render_options(job: Job):
     """Resolve (music_path, target_volume_db, loop) for rendering.
 
     The reference's measured mean music loudness (music_volume_db) is the
-    target loudness the rendered track should land at — this is independent
+    target loudness the rendered track should land at â€” this is independent
     of WHICH music file is used. When the user supplies their own music_path
     we still want the rendered music to sit at the reference's loudness, so
     we pass the reference dB through as the target and let

@@ -73,6 +73,10 @@ services:
       # Starter and mount a disk at /app/data to keep both across deploys.
       - key: BROLL_FRAMEIO_SHARE_URL
         value: https://next.frame.io/share/42cc1dbe-617b-477b-88be-bd1db71fd7a8/6e6f6db3-5f81-4913-b170-fd24862f2a23
+      # Optional secondary share ("Also search folder 2" checkbox) — merged
+      # into the same searchable index as folder 1 when the user ticks it.
+      - key: BROLL_FRAMEIO_SHARE_URL_2
+        value: https://next.frame.io/share/fb247341-ee29-4e6b-a278-c6e356b6ad82/
       # No browser on Render — disable cookies-from-browser so yt-dlp
       # doesn't waste a failed extraction attempt per process start. Upload
       # cookies via POST /api/youtube-cookies instead when YouTube needs them.

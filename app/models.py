@@ -249,12 +249,27 @@ class Job(BaseModel):
     # Off = historical keyword-only matching. Persisted on the Job so the
     # audit row can surface which path ran.
     use_intelligent_selector: bool = True
+    # ── Caption burn-in (replicate jobs) ─────────────────────────────────
+    # When True (default), the renderer burns the 3-word transcript cues
+    # into the output video via the ASS subtitle filter. When False, the
+    # title still renders but no caption Dialogue lines are emitted — the
+    # output is a title-only video. Transcription still runs (used for the
+    # title and B-roll queries) so we only skip the burn-in step, not the
+    # whisper call. Defaults keep pre-existing meta.json rows loading fine.
+    add_caption: bool = True
     # ── B-roll source selection (replicate jobs) ─────────────────────────
     # Where span B-roll may come from: "frameio" (the synced Frame.io share
     # only), "youtube" (YouTube search only), or "both" (default, ladder
     # tries Frame.io library first then YouTube). The reference-crop rung
     # stays as the guaranteed fallback in every mode.
     broll_source: str = "both"
+    # Per-job toggle for the optional secondary Frame.io share configured
+    # via BROLL_FRAMEIO_SHARE_URL_2. When True (and the secondary URL is
+    # non-empty in settings), the secondary share is synced alongside the
+    # primary one and its clips are added to the searchable B-roll library
+    # for this job only — persisted on the Job so old meta.json rows still
+    # load with the default of False.
+    use_broll_frameio_2: bool = False
     # Non-fatal notice surfaced to the UI (e.g. "YouTube unavailable — used
     # Frame.io only"). Unlike `error` it doesn't fail the job.
     warning: str = ""

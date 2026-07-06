@@ -226,8 +226,10 @@ def sync_frameio_share(url: str, target_dir: Path) -> dict:
 
 
 # Skip re-walking the share (many GraphQL round-trips even when every file is
-# already on disk) if the last successful sync is younger than this.
-_SYNC_TTL_SECONDS = 15 * 60
+# already on disk) if the last successful sync is younger than this. Job-time
+# B-roll recovery should prefer the local mirror; a full Frame.io tree walk can
+# take minutes on large shares and makes rendering look stuck.
+_SYNC_TTL_SECONDS = 12 * 60 * 60
 
 
 def ensure_frameio_library(share_url: str, settings: "Settings") -> Path:

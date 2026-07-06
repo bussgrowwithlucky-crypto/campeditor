@@ -1,6 +1,9 @@
 .venv/
 .env
 data/
+broll big celebrity/
+logs/
+check_syntax.py
 __pycache__/
 *.pyc
 .pytest_cache/

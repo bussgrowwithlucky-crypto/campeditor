@@ -17,7 +17,7 @@ def test_yt_dlp_uses_configured_cookie_file(tmp_path: Path) -> None:
     assert "--cookies-from-browser" not in command
 
 
-def test_yt_dlp_falls_back_to_browser_cookies(tmp_path: Path) -> None:
+def test_yt_dlp_ignores_browser_cookie_setting(tmp_path: Path) -> None:
     missing = tmp_path / "missing.txt"
     settings = Settings(groq_api_key="", llm_api_key="")
     settings.ytdlp_cookies_file = missing
@@ -25,5 +25,4 @@ def test_yt_dlp_falls_back_to_browser_cookies(tmp_path: Path) -> None:
 
     command = _yt_dlp_command("https://youtube.com/shorts/example", tmp_path / "reference.mp4", settings)
 
-    assert "--cookies-from-browser" in command
-    assert "chrome" in command
+    assert "--cookies-from-browser" not in command

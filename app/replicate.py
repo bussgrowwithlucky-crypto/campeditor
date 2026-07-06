@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ANALYZE_SECONDS = 60.0
 # Threshold for the speech-free "music window" the gap-fallback uses when
-# MDX-Net can't produce a usable instrumental. 3s was too strict — a
+# MDX-Net can't produce a usable instrumental. 3s was too strict â€” a
 # continuous-speech reference (e.g. a 21s reel with the speaker talking
 # start-to-finish) has no 3s gap, so the fallback returned None and the
 # rendered video played without music. 1.5s is permissive enough to find
@@ -41,7 +41,7 @@ MIN_MUSIC_GAP = 1.5
 # transcript only feeds music gap-detection (looking for speech-free
 # windows), so we don't need large-v3 word-level accuracy. `medium` runs
 # ~3x realtime on CPU vs large-v3's ~1x, dropping reference transcription
-# from ~60s to ~20s on a 21-second reel — a meaningful chunk of the
+# from ~60s to ~20s on a 21-second reel â€” a meaningful chunk of the
 # `analyzing` stage. The source clip's transcript still uses large-v3
 # (the default) so caption timing is unaffected.
 REFERENCE_WHISPER_MODEL = "medium"
@@ -77,17 +77,6 @@ def download_reference(url: str, work_dir: Path, settings: Settings) -> Path:
         text=True,
         timeout=300,
     )
-    if result.returncode != 0 and _is_browser_cookie_error(result.stderr):
-        # A locked/unreadable/undecryptable browser cookie DB shouldn't kill
-        # public downloads. yt-dlp #10927: Chrome 130+ DPAPI cookie encryption
-        # breaks "--cookies-from-browser chrome" — the stderr says "decrypt with
-        # DPAPI" (no "cookie" word), so a naive substring check lets the error
-        # propagate and fail the whole job. Drop cookie args and retry.
-        cookieless = [arg for index, arg in enumerate(command) if not (
-            arg in ("--cookies", "--cookies-from-browser")
-            or (index > 0 and command[index - 1] in ("--cookies", "--cookies-from-browser"))
-        )]
-        result = subprocess.run(cookieless, capture_output=True, text=True, timeout=300)
     if result.returncode != 0 or not target.exists() or target.stat().st_size < 10_000:
         raise RuntimeError(f"Reference download failed: {result.stderr[-400:]}")
     return target
@@ -109,8 +98,6 @@ def _yt_dlp_command(url: str, target: Path, settings: Settings) -> list[str]:
     cookies_file = settings.ytdlp_cookies_file
     if cookies_file and cookies_file.exists():
         command.extend(["--cookies", str(cookies_file)])
-    elif settings.ytdlp_cookies_from_browser.strip():
-        command.extend(["--cookies-from-browser", settings.ytdlp_cookies_from_browser.strip()])
     command.append(url)
     return command
 
@@ -129,15 +116,15 @@ def _is_browser_cookie_error(stderr: str) -> bool:
 def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) -> ReferenceAnalysis:
     """Analyze the reference short. Heavy stages (Whisper, frame extraction,
     describe_spans vision, music separation, title read) take 1-4 min even on
-    the optimized path. When the same reference is uploaded again — extremely
+    the optimized path. When the same reference is uploaded again â€” extremely
     common in the DPA workflow where a creator iterates on the same short
-    with different cuts — we cache the full ReferenceAnalysis by file
+    with different cuts â€” we cache the full ReferenceAnalysis by file
     content hash and return it directly.
 
     The cache invalidates automatically: any change to the reference bytes
     produces a different hash, and the cache file is regenerated. music_path
     is dropped on cache hit because the file lives in the prior job's
-    work_dir and isn't safe to point at across jobs — for refs ≤30s
+    work_dir and isn't safe to point at across jobs â€” for refs â‰¤30s
     music_path is None anyway (MDX-Net skipped). For longer refs the music
     extraction is small enough that re-running it on cache hit is cheap.
     """
@@ -164,7 +151,7 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
             # Always re-attempt music extraction on cache hit. The cache was
             # written before music_path was persisted, and even when it
             # was, the prior run's MDX-Net attempt may have failed
-            # because the model wasn't available or timed out — a later
+            # because the model wasn't available or timed out â€” a later
             # run might succeed. _extract_music is cheap on the happy
             # path (gap fallback is <1s); MDX-Net has its own 120s cap.
             transcript = Transcript(
@@ -192,7 +179,7 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
 
     # Group A: transcribe (CPU-bound Whisper) and extract_reference_frames
     # (I/O-bound ffmpeg) both consume the reference file but don't share
-    # outputs — run them concurrently.
+    # outputs â€” run them concurrently.
     with ThreadPoolExecutor(max_workers=2) as _executor:
         _transcript_future = _executor.submit(
             transcribe,
@@ -209,7 +196,7 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
     spans = detect_broll_spans(frames)
 
     # Group B: describe_spans (cloud vision over frames) and _read_title
-    # (cloud vision over title frame) are independent — run concurrently.
+    # (cloud vision over title frame) are independent â€” run concurrently.
     # _read_title is cached by reference file hash, so a cache hit returns
     # instantly without entering the network/vision stage.
     with ThreadPoolExecutor(max_workers=2) as _executor:
@@ -260,7 +247,7 @@ def analyze_reference(reference_path: Path, work_dir: Path, settings: Settings) 
 
     # Persist the analysis to cache. transcript.words is stored so a
     # cache hit can re-run _extract_music (which needs the word timestamps
-    # to find speech-free gaps). music_path itself is NOT cached — it
+    # to find speech-free gaps). music_path itself is NOT cached â€” it
     # lives in the prior job's work_dir and isn't safe to point at across
     # jobs. We do cache a "music_tried" flag so cache hits know whether
     # the prior run successfully produced a music track or not.
@@ -353,7 +340,7 @@ def _read_title(reference_path: Path, ref_dir: Path, settings: Settings) -> str:
 def _reference_cache_key(reference_path: Path) -> str:
     """Stable per-content hash for the reference file. Uses file size plus
     the first and last 1MB so re-uploads of the same file collide without
-    streaming the whole upload through the hash. md5 is fine here — this
+    streaming the whole upload through the hash. md5 is fine here â€” this
     is just a cache key, not a security primitive.
     """
     import hashlib
@@ -379,7 +366,7 @@ def _reference_cache_key(reference_path: Path) -> str:
 
 
 # A hook is a continuous-speech-free window at the start of the reference
-# where the visual is a B-roll cutaway — no on-screen caption, no speaker.
+# where the visual is a B-roll cutaway â€” no on-screen caption, no speaker.
 # Common in viral shorts: 0.5-3s of music-over-broll to grab attention,
 # then the A-roll kicks in. We treat anything in the [0.5, 3.5] second
 # range as a hook; outside that band it's either not a hook (speech starts
@@ -403,7 +390,7 @@ def _detect_hook(
     if duration <= 0:
         return None
     if not transcript.words:
-        # No speech — the whole video is effectively a hook, but cap it.
+        # No speech â€” the whole video is effectively a hook, but cap it.
         return (0.0, min(duration, HOOK_MAX_SECONDS))
     first_word_start = min((w.start for w in transcript.words), default=0.0)
     if HOOK_MIN_SECONDS <= first_word_start <= HOOK_MAX_SECONDS:
@@ -544,7 +531,7 @@ def _extract_music(
     """The reference's music WITHOUT its voiceover, timestamps preserved.
 
     Primary path: MDX-Net vocal separation (small ONNX model, CPU) over the full
-    reference audio — the instrumental keeps the exact same timeline, so music
+    reference audio â€” the instrumental keeps the exact same timeline, so music
     hits land at the same timestamps as the reference. Fallback when separation
     is unavailable/fails: the old longest-speech-free-gap loop.
 
@@ -601,11 +588,11 @@ def _extract_reference_audio_as_music(
 ) -> Path | None:
     """Last-resort music bed: the reference's own audio (with voice) at -18 dB,
     normalized and trimmed. Used only when both MDX-Net and the gap-fallback
-    return nothing — e.g. a continuous-speech reference with no 1.5s+ pause.
+    return nothing â€” e.g. a continuous-speech reference with no 1.5s+ pause.
     The user gets the reference's own audio bed in the output (with the voice
     faintly audible underneath the new edit) rather than total silence.
 
-    This is intentionally weaker than a real instrumental — but silent
+    This is intentionally weaker than a real instrumental â€” but silent
     videos are a worse failure mode than a faint voice under the music.
     """
     fallback_path = ref_dir / "music_fallback.m4a"
@@ -654,8 +641,8 @@ def _separate_instrumental(reference_path: Path, ref_dir: Path, settings: Settin
         return music_path
     try:
         # Skip the slow MDX-Net path for short references. MDX-Net on CPU
-        # Note: we used to skip MDX-Net for refs ≤30s on the theory that
-        # the gap fallback would be just as good. It isn't — a continuous-
+        # Note: we used to skip MDX-Net for refs â‰¤30s on the theory that
+        # the gap fallback would be just as good. It isn't â€” a continuous-
         # speech reference (e.g. a 21s reel with the speaker talking
         # start-to-finish) has no 3s+ gap, so the fallback returns None
         # and the rendered video plays without music. MDX-Net actually
@@ -664,7 +651,7 @@ def _separate_instrumental(reference_path: Path, ref_dir: Path, settings: Settin
         # bounded).
         wav = ref_dir / "ref_audio.wav"
         # Don't re-extract if a previous run already left a usable WAV on
-        # disk — extraction takes 5-30s for an MPEG on Windows and is
+        # disk â€” extraction takes 5-30s for an MPEG on Windows and is
         # identical for the same reference.
         if not wav.exists() or wav.stat().st_size < 5_000:
             extract = subprocess.run(
