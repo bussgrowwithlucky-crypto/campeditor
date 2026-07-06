@@ -38,11 +38,11 @@ services:
       # Token-Plan key drives BOTH text and vision rungs from one base URL.
       # Telegram-gated: link Telegram + join required channels at
       # https://router.bynara.id/settings, or the key 403s with
-      # "telegram_required". Set the values in the Render dashboard
-      # (sync: false keeps them out of the repo).
+      # "telegram_required". The base URL is public (not a secret) so it's
+      # hardcoded here; only the API key is marked sync:false to keep it
+      # out of the repo.
       - key: LLM_BASE_URL
         value: https://router.bynara.id/v1
-        sync: false
       - key: LLM_MODEL
         value: mistral-large
       - key: LLM_VISION_MODEL
