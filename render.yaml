@@ -22,12 +22,16 @@ services:
     autoDeploy: true       # redeploy on every push to main
     healthCheckPath: /api/health
     # Render sets $PORT automatically; our start.sh reads it.
-    # Persistent disk for the B-roll library cache + library index so
-    # redeploys don't force a full re-vision of the 290 library clips.
-    disk:
-      name: campeditor-data
-      mountPath: /app/data
-      sizeGB: 5
+    # NOTE: persistent disks are NOT supported on the free tier. The
+    # B-roll library cache and library index will rebuild on every
+    # redeploy (~5 min one-time vision cost for 290 clips). To keep the
+    # cache across redeploys, upgrade to Starter ($7/mo) or higher and
+    # uncomment the disk block below.
+    #
+    # disk:
+    #   name: campeditor-data
+    #   mountPath: /app/data
+    #   sizeGB: 5
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
