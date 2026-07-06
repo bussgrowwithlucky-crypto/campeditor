@@ -6,13 +6,23 @@
 
 FROM python:3.11-slim AS base
 
-# System deps: ffmpeg for video processing, curl for health checks,
-# ca-certificates for outbound HTTPS to byNara / Groq / yt-dlp.
+# System deps:
+#   ffmpeg           — video processing (transcoding, trimming, muxing)
+#   curl             — health checks + yt-dlp fallback
+#   ca-certificates  — outbound HTTPS to byNara / Groq / yt-dlp
+#   wget             — used by audio-separator's model downloads
+#   build-essential  — gcc + make + headers; required because audio-separator
+#                      → diffq ships a C extension (bitpack.c) with no
+#                      prebuilt wheel for linux-x86_64 + Python 3.11, so
+#                      pip has to compile it from source.
+#   python3-dev      — Python.h headers needed by the same C extension.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
         ca-certificates \
         wget \
+        build-essential \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install Python deps ----
