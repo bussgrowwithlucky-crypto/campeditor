@@ -1,0 +1,6 @@
+2026-07-05 22:34:37,603 [INFO] Original _INDEX_CACHE_VERSION = 2
+2026-07-05 22:34:37,604 [INFO] Bumped _INDEX_CACHE_VERSION to 3 (in-memory only)
+2026-07-05 22:34:37,612 [INFO] Temp data_dir = C:\Users\mohit\AppData\Local\Temp\campeditor_v2_live_qknqsejd
+2026-07-05 22:34:37,641 [INFO] Monkeypatched app.broll._vision with per-frame canned responses
+2026-07-05 22:34:37,641 [INFO] Calling build_library_index...
+2026-07-05 22:34:37,644 [INFO] Purged 0 stale frame-tag cache files (prompt version 0 -> 2)

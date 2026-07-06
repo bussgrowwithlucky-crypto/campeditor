@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile app/replicate.py app/rendering.py app/config.py)",
+      "Bash(netstat -ano)",
+      "Bash(sort -k6,7)"
+    ]
+  }
+}

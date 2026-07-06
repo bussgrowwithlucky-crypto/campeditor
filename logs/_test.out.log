@@ -1,0 +1,11 @@
+
+=== Step 1/4  Checking Python 3.11+ ===
+  [OK] Found python (3.11.15) at C:\Users\mohit\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+
+=== Step 2/4  Checking FFmpeg ===
+  [OK] FFmpeg at C:\Users\mohit\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe
+
+=== Step 3/4  Setting up virtualenv + dependencies ===
+  [OK] .venv exists, reusing
+  [OK] Upgrading pip ...
+  [OK] Installing campeditor + dependencies (this takes a few minutes)...

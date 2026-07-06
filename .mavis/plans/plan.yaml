@@ -1,0 +1,655 @@
+version: 1
+plan:
+  name: "Intelligent B-roll Selection System (Test Build)"
+  max_concurrency: 4
+  max_consecutive_failures: 2
+  max_cycles: 8
+  auto_reject_retries: 1
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+
+tasks:
+  # ---------------------------------------------------------------------------
+  # Track 1: Foundation — FeatureVector schema, vibe extractor, library indexer
+  # ---------------------------------------------------------------------------
+  - id: foundation
+    title: "Foundation: FeatureVector + vibe extractor + library indexer"
+    assigned_to: coder
+    verified_by: verifier
+    max_retries: 2
+    prompt: |
+      You are building the FOUNDATION of a NEW intelligent B-roll selection system
+      for the campeditor project.
+
+      CONTEXT
+      - The existing campeditor B-roll system (C:\campeditor\app\broll.py) does
+        basic matching by category/subject overlap and uses a single 3-8 word
+        search query for YouTube fallback. It doesn't capture "vibe" at all —
+        so a cinematic dark moody reference cutaway can match a "movie" library
+        clip that's bright comedy. We need a SEPARATE test system that captures
+        deeper aesthetics (mood, color palette, lighting, cinematography, motion,
+        energy) and uses multi-dimensional similarity.
+      - DO NOT MODIFY any file under C:\campeditor\app\ . The existing software
+        must keep working untouched.
+      - The new system is for TESTING — a sibling package that can be run
+        standalone, before we decide whether to integrate.
+
+      LOCATION
+      - Create the package at C:\campeditor\broll_intelligence\
+      - Files to create:
+          broll_intelligence/__init__.py
+          broll_intelligence/config.py             # pydantic-settings; reads .env
+          broll_intelligence/feature_vector.py     # FeatureVector dataclass + helpers
+          broll_intelligence/vision_ladder.py      # Groq->NVIDIA->Gemini->Ollama copy
+          broll_intelligence/vibe_extractor.py     # vision + CV-based feature extraction
+          broll_intelligence/library_indexer.py    # incremental library index
+          broll_intelligence/CONTRACT.md           # public schema contract for downstream tasks
+          broll_intelligence/tests/__init__.py
+          broll_intelligence/tests/conftest.py
+          broll_intelligence/tests/test_vibe_extractor.py
+          broll_intelligence/tests/test_library_indexer.py
+          broll_intelligence/README.md             # brief overview
+
+      FEATURE SCHEMA (this is the public contract — paste it verbatim into CONTRACT.md):
+
+          @dataclass
+          class FeatureVector:
+              # Subject matter (compatible with existing campeditor broll tags)
+              subjects: list[str]              # 0-3 concrete nouns (lowercase)
+              setting: list[str]               # 0-2 location descriptors
+              action: list[str]                # 0-2 verbs
+              category: str                    # movie|sports|tech|lifestyle|money|other
+              query: str                       # 3-8 word stock search phrase
+              # Vibe / aesthetic (NEW)
+              mood: list[str]                  # 0-3 words from fixed mood vocab
+              energy: str                      # low|medium|high
+              lighting: str                    # low-key|high-key|natural|neon|golden-hour|mixed
+              color_palette: list[str]         # 0-3 dominant colors
+              # Cinematography (NEW)
+              shot_type: str                   # wide|medium|close-up|extreme-close-up|aerial|overhead|two-shot
+              camera_motion: str               # static|pan|tilt|dolly|handheld|tracking|zoom
+              depth_of_field: str              # deep|shallow
+              # Quantitative features (OpenCV-derived)
+              palette_warmth: float            # 0..1 (cool→warm)
+              palette_saturation: float        # 0..1 (desaturated→vivid)
+              palette_brightness: float        # 0..1 (dark→bright)
+              motion_intensity: float          # 0..1 (static→chaotic)
+              contrast: float                  # 0..1 (flat→high-contrast)
+              edge_density: float              # 0..1 (smooth→busy)
+              # Provenance
+              confidence: float                # 0..1 (how complete extraction was)
+              source: str                      # "library" | "reference" | "youtube"
+              media_path: str                  # absolute path to source video
+
+      VISION PROMPT (paste verbatim into CONTRACT.md):
+
+          You are analyzing a video frame for an intelligent B-roll matching system.
+          Reply with ONLY a JSON object (no markdown, no prose) with these exact keys:
+
+          {
+            "subjects": list of 1-3 concrete nouns (objects/people, lowercase),
+            "setting": list of 1-2 location descriptors,
+            "action": list of 0-2 verbs,
+            "category": one of [movie, sports, tech, lifestyle, money, other],
+            "query": a short stock-footage search phrase of 3-8 words,
+            "mood": list of 1-3 words from [tense, uplifting, mysterious, epic,
+                    melancholic, energetic, calm, aggressive, romantic, nostalgic,
+                    ominous, joyful, neutral, dramatic, playful, sinister],
+            "energy": one of [low, medium, high],
+            "lighting": one of [low-key, high-key, natural, neon, golden-hour, mixed],
+            "color_palette": list of 2-3 dominant colors (e.g. ["deep blue", "amber"]),
+            "shot_type": one of [wide, medium, close-up, extreme-close-up, aerial, overhead, two-shot],
+            "camera_motion": one of [static, pan, tilt, dolly, handheld, tracking, zoom],
+            "depth_of_field": one of [deep, shallow]
+          }
+
+          Ignore any burned-in text/captions. Use empty lists/empty strings when nothing fits.
+
+      LIBRARY INDEX
+      - Cache file: C:\campeditor\data\cache\broll_intelligence_index.json
+      - Schema: { "version": 1, "clips": { "<absolute_clip_path>": { "mtime": float, "size": int, "features": <FeatureVector as dict> } } }
+      - Incremental: only re-tag when mtime or size changes
+      - Library root: configurable via env BROLL_INTELLIGENCE_LIBRARY_DIR (default: C:\campeditor\data\broll_library)
+      - VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"} (same as app/broll.py)
+      - Skip unreadable / zero-duration clips without crashing
+      - Persist atomically (write tmp + rename)
+
+      VISION LADDER
+      - Replicate the Groq->NVIDIA->Gemini->Ollama chain from app/broll.py:_vision
+        in broll_intelligence/vision_ladder.py (DO NOT import from app/*)
+      - Same provider cooldown semantics (90s on 429)
+      - Same timeout (25s cloud, 120s Ollama)
+      - Settings reads GROQ_API_KEY, NVIDIA_API_KEY(+2 fallbacks), GEMINI_API_KEY, OLLAMA_* from .env
+      - Configurable via pydantic-settings like app/config.py
+
+      QUANTITATIVE (CV) FEATURES
+      - palette_warmth = mean((R-B)/255) across the central 64% crop of the frame
+      - palette_saturation = mean(HSV saturation channel) / 255
+      - palette_brightness = mean(HSV value channel) / 255
+      - contrast = std(grayscale) / 128 (clipped to 0..1)
+      - edge_density = mean(Canny edge map) / 255
+      - motion_intensity: sample 3 frames at 0/50/100% of the clip; compute mean
+        frame-to-frame pixel diff (grayscale absdiff / 255); clip to 0..1
+      - If any single feature can't be computed, set it to 0.0 and lower confidence
+
+      CONSTRUCTION
+      - extract_from_video(path, settings) -> FeatureVector: ffmpeg-extract 3 frames
+        at 25/50/75% (or 0/50/100% if duration too short), call vision ladder on the
+        middle frame for tag fields, run CV passes on the middle frame for numerical
+        fields, average numerical fields across frames when multiple frames exist
+      - Confidence = (number of non-empty vision fields) / (total vision fields) * 0.5
+        + (1.0 if all numerical fields computed else 0.5) * 0.5
+      - Robust JSON parsing: strip ``` fences, find { ... } span, tolerate trailing junk
+
+      TESTS (all offline, no API calls, no network)
+      - test_vibe_extractor.py: monkeypatch vision_ladder to return canned JSON;
+        verify FeatureVector fields are populated, validation rejects unknown
+        categories / lighting / shot types, fallback to default-empty FeatureVector
+        when vision fails
+      - test_library_indexer.py: build a temp dir with 3 fake video files
+        (use tiny generated mp4s via ffmpeg or empty files with valid mtime),
+        monkeypatch extractor; verify index.json is written, that re-running with
+        unchanged mtime does NOT call the extractor (mock-call-count == 0),
+        changing mtime DOES re-extract, and that a corrupt cache file is recovered
+        gracefully (treated as empty)
+      - conftest.py: shared fixtures (fake mp4 generator, mock vision response)
+      - Tests must pass under `python -m pytest broll_intelligence/tests -q`
+
+      CONSTRAINTS
+      - DO NOT modify any file under C:\campeditor\app\
+      - DO NOT import from app.*
+      - All new code under C:\campeditor\broll_intelligence\
+      - Python 3.11+ compatible (matches campeditor)
+      - Use pydantic-settings for config
+      - Read API keys from C:\campeditor\.env (same .env as campeditor)
+      - No git commits unless explicitly asked
+
+      DELIVERABLE
+      - All listed files exist and pass their tests
+      - CONTRACT.md clearly documents: FeatureVector schema, vision prompt,
+        library index cache schema, package public API
+      - Test command exits 0
+      - README.md explains how to run the foundation standalone
+
+      Report back with:
+      1. List of files created with line counts
+      2. Test command + output (must show all tests passing)
+      3. Any deviations from this spec
+
+    verify_prompt: |
+      Independently verify the foundation deliverable. Do NOT just re-read the
+      producer's summary — re-derive everything from the file system.
+
+      Steps:
+      1. Confirm `ls C:\campeditor\app\broll.py` and `git status` (or equivalent)
+         show NO modifications to anything under C:\campeditor\app\ .
+      2. Read C:\campeditor\broll_intelligence\CONTRACT.md and verify it contains:
+         - The exact FeatureVector dataclass schema (all 20 fields listed above)
+         - The exact vision prompt text
+         - The library index JSON schema
+      3. Read broll_intelligence/feature_vector.py and confirm the dataclass
+         has all required fields with correct types (list[str] / str / float).
+      4. Read broll_intelligence/vibe_extractor.py and confirm:
+         - Vision ladder is NOT imported from app/*
+         - CV feature extractors handle missing/invalid frames without crashing
+         - Confidence is computed as specified
+      5. Read broll_intelligence/library_indexer.py and confirm:
+         - Cache schema matches the spec
+         - Incremental mtime/size check works (re-read the logic)
+         - Atomic write (tmp + rename) is used
+      6. Run `python -m pytest C:\campeditor\broll_intelligence\tests -q` and
+         confirm it exits 0 with all tests passing.
+      7. Run a quick sanity import: `python -c "from broll_intelligence.feature_vector
+         import FeatureVector; f=FeatureVector(); print(f.confidence)"` — must
+         succeed without error.
+      8. Adversarial: try to construct a FeatureVector with bad enum values
+         (e.g., category='foo') and confirm it gets coerced/cleared rather than
+         silently accepted.
+
+      PASS only if every step above succeeds. FAIL with the precise missing
+      evidence if anything is wrong.
+
+  # ---------------------------------------------------------------------------
+  # Track 2: Multi-dimensional matcher (depends on foundation)
+  # ---------------------------------------------------------------------------
+  - id: matcher
+    title: "Multi-dimensional B-roll matcher"
+    assigned_to: coder
+    verified_by: verifier
+    depends_on: [foundation]
+    max_retries: 2
+    prompt: |
+      You are building the MATCHER for the intelligent B-roll selection system.
+
+      CONTEXT
+      - The foundation task has already created C:\campeditor\broll_intelligence\
+        with FeatureVector schema and library indexer. READ broll_intelligence/CONTRACT.md
+        BEFORE starting — that is your public contract.
+      - DO NOT modify any file under C:\campeditor\app\ .
+
+      LOCATION
+      - Add: C:\campeditor\broll_intelligence\matcher.py
+      - Add: C:\campeditor\broll_intelligence\tests\test_matcher.py
+      - You MAY add a small "Compatibility matrices" addendum at the bottom of
+        broll_intelligence/CONTRACT.md (clearly separated, don't disturb existing content)
+
+      PUBLIC API
+          rank_candidates(
+              reference: FeatureVector,
+              index: list[tuple[Path, FeatureVector]],
+              top_k: int = 5,
+              used_clips: set[Path] | None = None,
+          ) -> list[tuple[Path, FeatureVector, float]]
+        # Ordered by score descending. Skips clips in used_clips.
+
+      COMPOSITE SCORE (0..1)
+
+      Subject component (weight 0.30):
+        - 0.4 * (1.0 if category matches else 0.5 if same family else 0.0)
+        - 0.4 * Jaccard(subjects)
+        - 0.2 * Jaccard(setting)
+
+      Vibe component (weight 0.45):
+        - 0.30 * mood_similarity   # Jaccard, with synonym fallback ("mysterious"~"ominous", "energetic"~"aggressive", "calm"~"melancholic", "joyful"~"uplifting")
+        - 0.20 * (1.0 - (|Δwarmth| + |Δsaturation| + |Δbrightness|) / 3)
+        - 0.15 * lighting_score    # 1.0 exact, 0.4 compatible, 0.0 incompatible
+        - 0.20 * (1.0 - |Δmotion_intensity|)
+        - 0.15 * (1.0 - |Δcontrast|)
+
+      Cinematography component (weight 0.15):
+        - 0.4 * shot_type_score     # 1.0 exact, 0.5 compatible, 0.0 else
+        - 0.3 * (1.0 if camera_motion matches else 0.4 if compatible else 0.0)
+        - 0.3 * (1.0 if depth_of_field matches else 0.0)
+
+      Energy component (weight 0.10):
+        - 1.0 - |energy_score_diff|     # low=0.0, medium=0.5, high=1.0
+
+      Final composite = weighted sum, with weights renormalized when components
+      contribute 0 (e.g., if reference has no mood fields, vibe weight redistributes
+      to subject component).
+
+      COMPATIBILITY TABLES (document in CONTRACT.md addendum)
+        Lighting:
+          low-key <-> natural, high-key <-> natural, neon <-> mixed, golden-hour <-> natural
+          all other pairs -> incompatible
+        Shot type:
+          close-up <-> extreme-close-up, wide <-> medium, aerial <-> overhead
+          all other pairs -> incompatible
+
+      TEST COVERAGE (test_matcher.py)
+      1. Identical FeatureVectors score == 1.0 (within 0.001)
+      2. Completely orthogonal FeatureVectors (different category, no overlap,
+         opposite mood vocab) score < 0.3
+      3. Same-category + matching mood + matching color palette scores > 0.8
+      4. used_clips set is respected (skipped clips never appear in output)
+      5. Missing fields on either side -> graceful degradation, score still in [0,1]
+      6. Top-K ordering is stable: ranking 10 candidates, top-3 must be the same
+         candidates as ranking 100 with top_k=3
+      7. Pure-subject match (no vibe data) doesn't crash and produces sensible ranking
+      8. Lighting compatibility: "low-key" reference ranks "natural" candidate above
+         "high-key" candidate (same mood/subject)
+
+      CONSTRAINTS
+      - DO NOT modify any file under C:\campeditor\app\
+      - DO NOT change foundation files (CONTRACT.md may receive a small addendum)
+      - Use existing test patterns from foundation tests
+      - Pure Python; no extra deps beyond what campeditor already has
+
+      DELIVERABLE
+      - matcher.py exists with the public API documented in module docstring
+      - test_matcher.py exists with at least 8 test cases, all passing
+      - CONTRACT.md has the compatibility tables addendum
+      - `python -m pytest C:\campeditor\broll_intelligence\tests/test_matcher.py -q` passes
+
+      Report back with:
+      1. Files created/changed with line counts
+      2. Test command + output
+      3. Scoring formula summary (one-line for each component)
+      4. Any deviations
+
+    verify_prompt: |
+      Independently verify the matcher.
+
+      Steps:
+      1. Confirm no file under C:\campeditor\app\ has been modified.
+      2. Read C:\campeditor\broll_intelligence\matcher.py and confirm the public
+         API signature matches: rank_candidates(reference, index, top_k, used_clips).
+      3. Read the scoring code and confirm all 4 components (subject, vibe,
+         cinematography, energy) are implemented with the specified weights.
+      4. Read C:\campeditor\broll_intelligence\CONTRACT.md and confirm the
+         compatibility tables for lighting and shot_type are documented.
+      5. Run `python -m pytest C:\campeditor\broll_intelligence\tests/test_matcher.py -v`
+         and confirm all tests pass (>= 8 tests).
+      6. Adversarial: write a tiny script that constructs (a) two identical
+         FeatureVectors (assert score ~= 1.0), (b) two opposite FeatureVectors
+         (assert score < 0.3), and run it. Paste the script + output.
+      7. Adversarial: feed a FeatureVector with all empty vibe fields to the
+         matcher. Confirm the function still returns valid scores (no crash,
+         no NaN, score in [0, 1]).
+
+      PASS only if every step succeeds. FAIL with the precise gap.
+
+  # ---------------------------------------------------------------------------
+  # Track 3: Smart YouTube fallback with vibe-aware queries (depends on foundation)
+  # ---------------------------------------------------------------------------
+  - id: search
+    title: "Smart YouTube fallback with vibe-aware queries"
+    assigned_to: coder
+    verified_by: verifier
+    depends_on: [foundation]
+    max_retries: 2
+    prompt: |
+      You are building the SMART YOUTUBE FALLBACK for the intelligent B-roll
+      selection system.
+
+      CONTEXT
+      - The foundation task has created FeatureVector + library indexer. READ
+        broll_intelligence/CONTRACT.md BEFORE starting.
+      - DO NOT modify any file under C:\campeditor\app\ .
+      - The matcher (separate task) handles local-library ranking; this task
+        handles the YouTube/network fallback.
+
+      LOCATION
+      - Add: C:\campeditor\broll_intelligence\search.py
+      - Add: C:\campeditor\broll_intelligence\tests\test_search.py
+      - Add: broll_intelligence/llm_ladder.py  (DO NOT import from app/*)
+
+      PUBLIC API
+          @dataclass
+          class BrollCandidate:
+              video_id: str
+              url: str
+              preview_path: Path | None        # local cached preview; None if not downloaded
+              score: float                     # composite vibe match score
+              source_query: str                # which generated query this came from
+              features: FeatureVector | None   # extracted from preview, if available
+
+          def search_broll(
+              reference: FeatureVector,
+              top_k: int,
+              cache_dir: Path,
+              settings,
+              max_candidates_per_query: int = 4,
+              max_total_candidates: int = 12,
+          ) -> list[BrollCandidate]
+
+      BEHAVIOR
+
+      1. QUERY GENERATION — call the LLM ladder with this prompt:
+
+          You generate stock-footage search queries that capture the VIBE of a
+          B-roll scene. Given this scene description:
+            subjects: {subjects}
+            setting: {setting}
+            mood: {mood}
+            lighting: {lighting}
+            shot_type: {shot_type}
+            color_palette: {color_palette}
+
+          Reply with ONLY a JSON object: {"queries": [q1, q2, q3, q4, q5]}
+          Each query is <= 8 words. Each captures a DIFFERENT angle:
+            q1 = subject-focused (the main object/action)
+            q2 = mood-focused (emotional tone)
+            q3 = lighting-focused (visual lighting)
+            q4 = scene-focused (location + action)
+            q5 = aesthetic-focused (overall visual feel)
+
+         Append this prompt to CONTRACT.md as the "Query generation prompt"
+         addendum.
+
+         Each query truncated to <= 8 words. If LLM fails or returns malformed
+         JSON, fall back to a deterministic query set built from the
+         reference's own fields (subject query, mood lighting query, etc.).
+
+      2. SEARCH — for each query, use yt-dlp ytsearch via subprocess
+         (model after C:\campeditor\app\broll.py::_yt_dlp_search but DO NOT
+         import it). Aggregate results, dedup by video_id, junk-filter by title
+         (podcast/reaction/tutorial/etc.). Hard cap: max_total_candidates.
+
+      3. PREVIEW + SCORE — for each candidate, attempt to download a short
+         preview (use ffmpeg via subprocess like the existing system does).
+         If download succeeds:
+            - Extract one representative frame
+            - Call vibe_extractor.extract_from_frame() to get a FeatureVector
+            - Score with the SAME composite formula as the matcher (define
+              a small helper in matcher.py called `composite_score(ref, clip)`
+              that the matcher reuses; OR copy the formula into search.py
+              and unit-test both)
+         If download fails, score = 0 and mark preview_path=None.
+
+      4. RANK — return top_k candidates ordered by score desc.
+
+      LLM LADDER
+      - Same provider chain as app/broll.py: Groq -> NVIDIA -> Gemini -> Ollama
+      - Single-shot, max_tokens=200, temperature=0.4
+      - 15s timeout
+      - JSON-parse robust: strip ``` fences, find { ... } span
+
+      TEST COVERAGE (test_search.py)
+      - Mock the LLM ladder to return canned query lists; verify the fallback
+        when LLM fails
+      - Mock yt-dlp subprocess to return canned JSON; verify aggregation + dedup
+      - Mock ffmpeg + vibe_extractor; verify score assignment
+      - Verify top_k ordering is sensible
+      - Verify junk-title filter works ("podcast" in title -> skipped)
+      - All tests must run offline (no real subprocess / network)
+
+      CONSTRAINTS
+      - DO NOT modify any file under C:\campeditor\app\
+      - DO NOT import from app.*
+      - Reuse campeditor's FFMPEG_PATH env var
+      - All new code under C:\campeditor\broll_intelligence\
+
+      DELIVERABLE
+      - search.py with BrollCandidate dataclass + search_broll function
+      - llm_ladder.py with the chat ladder
+      - test_search.py with at least 5 test cases, all passing
+      - CONTRACT.md has the query-generation prompt appended
+
+      Report back with:
+      1. Files created/changed with line counts
+      2. Test command + output
+      3. Three sample query variants generated for a fake cinematic-dark FeatureVector
+
+    verify_prompt: |
+      Independently verify the smart YouTube fallback.
+
+      Steps:
+      1. Confirm no file under C:\campeditor\app\ has been modified.
+      2. Read C:\campeditor\broll_intelligence\search.py and confirm:
+         - BrollCandidate dataclass exists with the listed fields
+         - search_broll function exists with the listed signature
+         - It calls an LLM ladder and a yt-dlp subprocess (or their mocks)
+         - It uses the composite scoring formula
+      3. Read C:\campeditor\broll_intelligence\llm_ladder.py and confirm:
+         - No `from app.*` imports
+         - Same provider order as app/broll.py
+         - 15s timeout, max_tokens 200
+      4. Read C:\campeditor\broll_intelligence\CONTRACT.md and confirm the
+         query-generation prompt is appended.
+      5. Run `python -m pytest C:\campeditor\broll_intelligence\tests/test_search.py -v`
+         and confirm all tests pass (>= 5).
+      6. Adversarial: mock the LLM to return malformed JSON, verify the
+         function falls back to a deterministic query list and does NOT crash.
+      7. Adversarial: feed a query whose LLM response includes a query with
+         > 8 words; verify truncation.
+
+      PASS only if every step succeeds. FAIL with the precise gap.
+
+  # ---------------------------------------------------------------------------
+  # Track 4: Pipeline integration + CLI demo + side-by-side comparison report
+  # ---------------------------------------------------------------------------
+  - id: integration
+    title: "Pipeline integration + CLI demo + comparison report"
+    assigned_to: coder
+    verified_by: verifier
+    depends_on: [foundation, matcher, search]
+    max_retries: 2
+    prompt: |
+      You are integrating and validating the intelligent B-roll selection system.
+
+      CONTEXT
+      - Foundation, matcher, and search modules exist under
+        C:\campeditor\broll_intelligence\ . READ broll_intelligence/CONTRACT.md
+        BEFORE starting.
+      - DO NOT modify any file under C:\campeditor\app\ .
+      - Goal: a runnable pipeline with a CLI demo and a side-by-side
+        comparison report against the existing campeditor B-roll logic.
+
+      LOCATION
+      - Add: C:\campeditor\broll_intelligence\pipeline.py
+      - Add: C:\campeditor\broll_intelligence\demo.py
+      - Add: C:\campeditor\broll_intelligence\compare.py
+      - Add: C:\campeditor\broll_intelligence\tests\test_pipeline.py
+      - Update: C:\campeditor\broll_intelligence\README.md
+
+      PIPELINE ORCHESTRATOR (pipeline.py)
+
+      Public API:
+          @dataclass
+          class BrollItem:
+              source: str                # "library" | "youtube" | "reference_crop"
+              path: Path | None
+              url: str | None
+              score: float
+              features: FeatureVector | None
+
+          @dataclass
+          class BrollPack:
+              reference: FeatureVector
+              items: list[BrollItem]      # ordered best-first
+              diagnostics: dict           # which ladder rung fired, timings, etc.
+
+          def analyze_reference(video_path: Path, settings) -> FeatureVector
+          def select_broll(
+              ref_video: Path,
+              top_k: int = 5,
+              cache_dir: Path | None = None,
+          ) -> BrollPack
+
+      Ladder (run once per cutaway in the reference):
+        1. LIBRARY — index the library if not cached; run matcher.rank_candidates;
+           accept any clip with composite_score >= 0.55 (configurable)
+        2. YOUTUBE — if no library clip qualifies, run search.search_broll;
+           accept any candidate with composite_score >= 0.50
+        3. REFERENCE_CROP — if both fail, mark a "reference crop" placeholder
+           (the actual crop is out of scope; record metadata so the user can
+           see the ladder fell through)
+
+      CACHE
+      - Persist analyze_reference's FeatureVector to
+        C:\campeditor\data\cache\broll_intelligence_ref\<hash>.json
+      - Library index already persists via foundation; reuse it
+      - YouTube previews cached in C:\campeditor\data\cache\broll_intelligence_yt\
+
+      CLI DEMO (demo.py)
+
+          # Run from project root: py -m broll_intelligence.demo --reference <video>
+          python -m broll_intelligence.demo \
+              --reference <path-to-reference-video> \
+              --top-k 5 \
+              --library-dir <path> \
+              --json-out <path>
+
+      Behavior:
+        - Runs select_broll()
+        - Pretty-prints to console: ranked picks with score, source, key vibe tags
+        - Writes full BrollPack JSON to --json-out
+        - If API keys missing, runs in OFFLINE mode: builds FeatureVector with
+          quantitative fields only (no vision calls), uses cached library index
+          if available, prints a clear warning
+        - --help shows full usage
+
+      COMPARISON REPORT (compare.py)
+
+          python -m broll_intelligence.compare \
+              --reference <path-to-reference-video> \
+              --top-k 5 \
+              --output <markdown-path>
+
+      Behavior:
+        - Run BOTH the new pipeline AND a baseline implementation of the OLD
+          campeditor B-roll logic.
+        - Baseline MUST be re-implemented inline (or in a private baseline.py
+          under broll_intelligence/) — DO NOT import from app/. The baseline
+          reproduces the subject/category scoring from app/broll.py:
+              _local_score() with the same weights (3.0 category, 1.0 subjects,
+              1.0 setting; _LOCAL_SCORE_MAX = 8.0)
+              LLM tie-break over top 5 (can be skipped in offline mode)
+              _truncate_query() to 8 words
+        - Generate a markdown report with this structure:
+            # B-roll Selection: New vs Old
+            ## Reference
+              - path, FeatureVector summary (subjects, mood, lighting, palette)
+            ## Picks (side-by-side, table)
+              | Rank | New (source, score, vibe tags) | Old (source, score, top subject) |
+            ## Vibe similarity (new system only)
+              - For each pick: a one-line "vibe match" note
+            ## Notes
+              - What the new system did differently
+              - Caveats (vision unavailable, library empty, etc.)
+        - Report writes to --output (default data/broll_intelligence_comparison.md)
+
+      TESTS (test_pipeline.py, all offline)
+      1. End-to-end with mocked vision ladder + mocked yt-dlp; verify a single
+         library pick flows through correctly
+      2. Ladder fallthrough: when library has nothing qualifying, falls to
+         youtube; when youtube also fails, falls to reference_crop
+      3. Cache resumability: calling analyze_reference twice with the same
+         video only triggers vision once
+      4. Offline mode: no API keys -> still returns a BrollPack with quantitative
+         features only; no crash
+
+      README update
+      - Add: install (no install needed if running from source; pip install -e .
+        for the package), usage (demo + compare commands), architecture overview
+        (which file does what), reference link to CONTRACT.md
+
+      CONSTRAINTS
+      - DO NOT modify any file under C:\campeditor\app\
+      - compare.py MUST NOT import from app/*; baseline logic must be re-implemented
+      - All new code under C:\campeditor\broll_intelligence\
+
+      DELIVERABLE
+      - pipeline.py, demo.py, compare.py, test_pipeline.py all exist
+      - README.md updated
+      - `python -m pytest C:\campeditor\broll_intelligence\tests -q` passes
+      - `python -m broll_intelligence.demo --help` works
+      - `python -m broll_intelligence.compare --help` works
+
+      Report back with:
+      1. Files created/changed with line counts
+      2. Test command + output (all tests passing)
+      3. demo --help output
+      4. Sample comparison report layout (header + 1-2 rows of the picks table)
+
+    verify_prompt: |
+      Independently verify the integration.
+
+      Steps:
+      1. Confirm no file under C:\campeditor\app\ has been modified.
+      2. Read C:\campeditor\broll_intelligence\pipeline.py and confirm:
+         - BrollPack + BrollItem dataclasses exist
+         - select_broll follows the LIBRARY -> YOUTUBE -> REFERENCE_CROP ladder
+         - Composite score thresholds (0.55 / 0.50) are present and configurable
+      3. Read C:\campeditor\broll_intelligence\demo.py and confirm:
+         - argparse with --reference / --top-k / --library-dir / --json-out
+         - OFFLINE mode triggers when API keys are absent
+      4. Read C:\campeditor\broll_intelligence\compare.py and confirm:
+         - NO `from app.*` imports (use grep: `grep -r "from app" C:\campeditor\broll_intelligence\compare.py`)
+         - Baseline logic reproduces _local_score weights (3.0 category, 1.0
+           subjects, 1.0 setting, max 8.0)
+         - Markdown report contains the required sections
+      5. Run `python -m pytest C:\campeditor\broll_intelligence\tests -q` and
+         confirm all tests pass.
+      6. Run `python -m broll_intelligence.demo --help` and confirm it shows usage.
+      7. Run `python -m broll_intelligence.compare --help` and confirm it shows usage.
+      8. Adversarial: invoke `select_broll` with a non-existent reference path
+         and confirm it raises a clear error (not a stack trace).
+      9. Adversarial: invoke demo.py in OFFLINE mode (no API keys) against
+         a small fake reference video (use ffmpeg to generate a 2-second test
+         clip first if needed) and confirm it produces a valid BrollPack JSON
+         without crashing.
+
+      PASS only if every step succeeds. FAIL with the precise gap.

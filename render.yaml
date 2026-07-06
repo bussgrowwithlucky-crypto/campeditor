@@ -1,0 +1,56 @@
+# Render Blueprint — declarative deploy config.
+# https://render.com/docs/blueprint-spec
+#
+# Apply from the Render dashboard:
+#   New → Blueprint → connect the GitHub repo → Apply.
+# Render reads this file and provisions everything below.
+#
+# As of the all-local rewrite, NO cloud API keys are read by this service.
+# Vision + chat + transcription all run against a local Ollama daemon
+# bundled inside the container (see Dockerfile). This keeps the deploy
+# zero-cost and zero-secret-leak.
+
+services:
+  - type: web
+    name: campeditor
+    runtime: docker
+    plan: free             # 750 CPU-hours/month, sleeps after 15 min idle
+    region: oregon         # change to your nearest region
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeploy: true       # redeploy on every push to main
+    healthCheckPath: /api/health
+    # Render sets $PORT automatically; our start.sh reads it.
+    # Persistent disk for the B-roll library cache + library index so
+    # redeploys don't force a full re-vision of the 290 library clips.
+    disk:
+      name: campeditor-data
+      mountPath: /app/data
+      sizeGB: 5
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Ollama model selection. The Dockerfile runs `ollama serve` inside
+      # the container, so OLLAMA_BASE_URL points at the in-container daemon.
+      - key: OLLAMA_BASE_URL
+        value: http://localhost:11434/v1
+      - key: OLLAMA_VISION_MODEL
+        value: llava:13b
+      - key: OLLAMA_TEXT_MODEL
+        value: llama3.1:8b
+      # Whisper model for local transcription. "large-v3" is best quality;
+      # use "medium" or "small" if Render free tier OOMs.
+      - key: WHISPER_MODEL
+        value: large-v3
+      # Concurrent in-flight Ollama calls. The local GPU saturates at ~1-2;
+      # more in flight just adds RAM pressure without throughput gain.
+      - key: OLLAMA_MAX_CONCURRENCY
+        value: "2"
+      # Intelligent selector v2 knobs (defaults match SPEC §12)
+      - key: CAMPEDITOR_INTELLIGENT_CINEMA_FLOOR
+        value: "0.18"
+      - key: CAMPEDITOR_INTELLIGENT_CONTINUITY_PENALTY_MAX
+        value: "-0.08"
+      - key: CAMPEDITOR_INTELLIGENT_CONTINUITY_COSINE_THRESHOLD
+        value: "0.92"

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>campeditor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <h1>camp<span class="accent">editor</span></h1>
+    <p class="tagline">Landscape clip in. 9:16 viral short out.</p>
+
+    <form id="job-form">
+      <label class="field">
+        <span>Video file</span>
+        <input type="file" id="file" accept="video/*">
+      </label>
+
+      <fieldset class="field">
+        <legend>Clip</legend>
+        <label class="radio"><input type="radio" name="clip_mode" value="manual" checked> Manual</label>
+        <label class="radio"><input type="radio" name="clip_mode" value="auto"> AI viral clip</label>
+      </fieldset>
+
+      <div class="row" id="trim-row">
+        <label class="field">
+          <span>Start (s)</span>
+          <input type="number" id="start" min="0" step="0.1" value="0" required>
+        </label>
+        <label class="field">
+          <span>End (s)</span>
+          <input type="number" id="end" min="0.1" step="0.1" value="15" required>
+        </label>
+      </div>
+
+      <fieldset class="field">
+        <legend>Replicate</legend>
+        <label class="radio"><input type="checkbox" id="replicate"> Copy a reference short's style</label>
+        <div id="replicate-fields" hidden>
+          <label class="field">
+            <span>Reference link (YouTube / Shorts URL of the video to imitate)</span>
+            <input type="url" id="reference-url" placeholder="https://youtube.com/shorts/...">
+          </label>
+          <label class="field">
+            <span>… or upload the reference file</span>
+            <input type="file" id="reference" accept="video/*">
+          </label>
+          <label class="field">
+            <span>Background music (optional — auto-extracted from reference if empty)</span>
+            <input type="file" id="music" accept="audio/*,video/*">
+          </label>
+          <label class="radio pack">
+            <input type="checkbox" id="broll-pack">
+            <span>B-Roll Pack &mdash; don&rsquo;t insert B-roll; download the 2 best-matched clips per reference cutaway instead.</span>
+          </label>
+          <label class="radio pack">
+            <input type="checkbox" id="use-intelligent-selector" checked>
+            <span>Intelligent B-roll AI &mdash; boost candidates whose <em>vibe</em>, lighting, and shot type match the reference (slows the job a little, but picks B-roll that looks like the reference instead of just matching keywords).</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Title</legend>
+        <label class="radio"><input type="radio" name="title_mode" value="auto" checked> Auto (LLM)</label>
+        <label class="radio"><input type="radio" name="title_mode" value="manual"> Manual</label>
+        <input type="text" id="manual-title" placeholder="He reveals why he works 12h+" maxlength="80" hidden>
+      </fieldset>
+
+      <label class="radio pack">
+        <input type="checkbox" id="enable-learned-broll" checked>
+        <span>Auto-add learned B-roll (non-replicate jobs only &mdash; uncheck for captions + title only).</span>
+      </label>
+
+      <label class="field">
+        <span>Color grade</span>
+        <select id="color-grade">
+          <option value="none">None</option>
+          <option value="cinematic">Cinematic</option>
+          <option value="warm">Warm</option>
+          <option value="cool">Cool</option>
+          <option value="punchy">Punchy</option>
+        </select>
+      </label>
+
+      <button type="submit" id="render-btn">Render</button>
+    </form>
+
+    <section id="status-panel" hidden>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+      <p id="status-text"></p>
+      <p id="eta-text" class="eta"></p>
+      <p id="error-text" class="error" hidden></p>
+      <a id="download-link" class="download" hidden download>Download render</a>
+      <video id="preview" controls hidden></video>
+      <div id="variations" class="variations" hidden></div>
+      <h3 id="broll-pack-heading" class="section-heading" hidden>B-Roll Pack</h3>
+      <div id="broll-pack-panel" class="variations" hidden></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

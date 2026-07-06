@@ -1,0 +1,59 @@
+INFO:     Started server process [30560]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
+Watchdog failed stuck job 00c8158d0da3 (status was ingested)
+Watchdog failed stuck job 5518016f146b (status was ingested)
+Watchdog failed stuck job bfedc9a03c24 (status was broll_recovery)
+Watchdog failed stuck job c49b3ace5aa0 (status was ingested)
+Job e6844e33fb18 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    raise ValueError(
+ValueError: Job e6844e33fb18 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job 4b5f3b9d3f56 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    raise ValueError(
+ValueError: Job 4b5f3b9d3f56 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job 7c831ca44f82 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    raise ValueError(
+ValueError: Job 7c831ca44f82 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job 4bf5fed6ac12 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job 4bf5fed6ac12 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job e952445a1376 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job e952445a1376 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job 71b40de9dba3 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job 71b40de9dba3 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job 3cc74ac4f391 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job 3cc74ac4f391 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job e2e51774dbf8 failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job e2e51774dbf8 has no source video uploaded and is not a Frame.io folder job — cannot run.
+Job c7c5babc6dea failed
+Traceback (most recent call last):
+  File "C:\campeditor\app\jobs.py", line 308, in _run
+    # frameio_source_url but a set source_path.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Job c7c5babc6dea has no source video uploaded and is not a Frame.io folder job — cannot run.
