@@ -30,6 +30,21 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
+    # ---- Groq — Whisper transcription (audio -> text) ----
+    # Cloud-only; no local faster-whisper on the server. The audio file is
+    # POSTed to https://api.groq.com/openai/v1/audio/transcriptions and the
+    # response is mapped into the campeditor Transcript schema. Empty api_key
+    # disables transcription (the pipeline renders without captions).
+    groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY")
+    groq_base_url: str = Field(
+        default="https://api.groq.com/openai/v1", validation_alias="GROQ_BASE_URL"
+    )
+    # whisper-large-v3-turbo is the fastest Whisper model on Groq; whisper-large-v3
+    # is the higher-quality non-turbo sibling.
+    groq_transcription_model: str = Field(
+        default="whisper-large-v3-turbo", validation_alias="GROQ_TRANSCRIPTION_MODEL"
+    )
+
     # ---- Cloud LLM provider (title generation, clip selection, vision tagging) ----
     # Any OpenAI-compatible chat-completions endpoint. The same base_url +
     # api_key drive BOTH the text model (LLM_MODEL) and, when set, the

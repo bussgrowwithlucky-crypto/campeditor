@@ -47,12 +47,16 @@ services:
         value: mistral-large
       - key: LLM_VISION_MODEL
         value: mistral-medium-3-5
-      # ---- Groq — Whisper transcription ----
-      # Transcription is the only non-byNara model in the deploy. The
-      # whisper-large-v3-turbo endpoint on Groq is API-only (no local
-      # weights, no faster-whisper).
+      # ---- Groq — Whisper transcription (audio -> text) ----
+      # Cloud-only: the trimmed WAV is POSTed to Groq; no faster-whisper
+      # weights on the server. Set the API key in the Render dashboard
+      # (sync: false keeps it out of the repo).
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
       - key: GROQ_TRANSCRIPTION_MODEL
         value: whisper-large-v3-turbo
+      - key: GROQ_API_KEY
+        sync: false
       # ---- Intelligent selector v2 knobs (defaults match SPEC §12) ----
       - key: CAMPEDITOR_INTELLIGENT_CINEMA_FLOOR
         value: "0.18"
