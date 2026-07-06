@@ -5,10 +5,9 @@
 #   New → Blueprint → connect the GitHub repo → Apply.
 # Render reads this file and provisions everything below.
 #
-# As of the all-local rewrite, NO cloud API keys are read by this service.
-# Vision + chat + transcription all run against a local Ollama daemon
-# bundled inside the container (see Dockerfile). This keeps the deploy
-# zero-cost and zero-secret-leak.
+# Vision + text + transcription all go through cloud APIs (byNara router
+# + Groq Whisper). No local models, no Ollama, no faster-whisper on the
+# server. The image stays small and the free tier can actually run it.
 
 services:
   - type: web
@@ -35,23 +34,26 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
-      # Ollama model selection. The Dockerfile runs `ollama serve` inside
-      # the container, so OLLAMA_BASE_URL points at the in-container daemon.
-      - key: OLLAMA_BASE_URL
-        value: http://localhost:11434/v1
-      - key: OLLAMA_VISION_MODEL
-        value: llava:13b
-      - key: OLLAMA_TEXT_MODEL
-        value: llama3.1:8b
-      # Whisper model for local transcription. "large-v3" is best quality;
-      # use "medium" or "small" if Render free tier OOMs.
-      - key: WHISPER_MODEL
-        value: large-v3
-      # Concurrent in-flight Ollama calls. The local GPU saturates at ~1-2;
-      # more in flight just adds RAM pressure without throughput gain.
-      - key: OLLAMA_MAX_CONCURRENCY
-        value: "2"
-      # Intelligent selector v2 knobs (defaults match SPEC §12)
+      # ---- byNara Router — Vision + Text (primary) ----
+      # Token-Plan key drives BOTH text and vision rungs from one base URL.
+      # Telegram-gated: link Telegram + join required channels at
+      # https://router.bynara.id/settings, or the key 403s with
+      # "telegram_required". Set the values in the Render dashboard
+      # (sync: false keeps them out of the repo).
+      - key: LLM_BASE_URL
+        value: https://router.bynara.id/v1
+        sync: false
+      - key: LLM_MODEL
+        value: mistral-large
+      - key: LLM_VISION_MODEL
+        value: mistral-medium-3-5
+      # ---- Groq — Whisper transcription ----
+      # Transcription is the only non-byNara model in the deploy. The
+      # whisper-large-v3-turbo endpoint on Groq is API-only (no local
+      # weights, no faster-whisper).
+      - key: GROQ_TRANSCRIPTION_MODEL
+        value: whisper-large-v3-turbo
+      # ---- Intelligent selector v2 knobs (defaults match SPEC §12) ----
       - key: CAMPEDITOR_INTELLIGENT_CINEMA_FLOOR
         value: "0.18"
       - key: CAMPEDITOR_INTELLIGENT_CONTINUITY_PENALTY_MAX
