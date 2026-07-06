@@ -50,6 +50,12 @@
             <span>Background music (optional — auto-extracted from reference if empty)</span>
             <input type="file" id="music" accept="audio/*,video/*">
           </label>
+          <fieldset class="field">
+            <legend>B-roll source</legend>
+            <label class="radio"><input type="checkbox" id="broll-source-frameio" checked> Frame.io folder</label>
+            <label class="radio"><input type="checkbox" id="broll-source-youtube" checked> YouTube</label>
+            <label class="radio"><input type="checkbox" id="broll-source-both" checked> Both</label>
+          </fieldset>
           <label class="radio pack">
             <input type="checkbox" id="broll-pack">
             <span>B-Roll Pack &mdash; don&rsquo;t insert B-roll; download the 2 best-matched clips per reference cutaway instead.</span>

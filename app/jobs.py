@@ -3,6 +3,7 @@ import threading
 import time
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event
 
 from fastapi import UploadFile
@@ -25,6 +26,7 @@ from app.broll import (
     fetch_learned_broll_cuts,
     gather_broll_pack,
 )
+from app.frameio_source import ensure_frameio_library
 from app.replicate import analyze_reference, download_reference
 from app.raw_source_finder import find_raw_source
 from app.store import JobStore
@@ -124,7 +126,11 @@ class Pipeline:
         broll_pack: bool = False,
         enable_learned_broll: bool = True,
         use_intelligent_selector: bool = True,
+        broll_source: str = "both",
     ) -> Job:
+        broll_source = (broll_source or "both").strip().lower()
+        if broll_source not in ("frameio", "youtube", "both"):
+            raise ValueError("broll_source must be one of: frameio, youtube, both")
         if clip_mode == ClipMode.MANUAL:
             if end <= start:
                 raise ValueError("End time must be after start time")
@@ -183,6 +189,10 @@ class Pipeline:
         # score. Only the B-roll ladder reads this; non-replicate jobs
         # ignore it.
         job.use_intelligent_selector = bool(use_intelligent_selector)
+        # Where span B-roll may come from (replicate jobs): the synced
+        # Frame.io share, YouTube search, or both. Reference-crop stays the
+        # guaranteed fallback in every mode.
+        job.broll_source = broll_source
         job.status = JobStatus.INGESTED
         job.progress = 0.1
         job.message = "Upload received"
@@ -398,6 +408,43 @@ class Pipeline:
                 job.reference_path = download_reference(job.reference_url, work_dir, self.settings)
                 self.store.save(job)
 
+            # B-roll source gating (job.broll_source): resolved once here and
+            # reused by the hook fetch + every broll_recovery rung below.
+            # - "frameio": library rung reads the synced Frame.io share
+            #   mirror ONLY; YouTube rung disabled.
+            # - "youtube": library rung disabled; YouTube rung on.
+            # - "both": Frame.io mirror when a share URL is configured
+            #   (falling back to the machine-local library otherwise) +
+            #   YouTube rung on.
+            broll_source_mode = (getattr(job, "broll_source", "both") or "both").lower()
+            broll_use_library = broll_source_mode in ("frameio", "both")
+            broll_use_youtube = broll_source_mode in ("youtube", "both")
+            broll_library_dir: Path | None = None  # None = settings.broll_library_dir
+            youtube_errors: list[str] = []
+            if job.replicate and broll_use_library:
+                share_url = self.settings.broll_frameio_share_url.strip()
+                if share_url:
+                    try:
+                        self._advance(
+                            job, cancellation, JobStatus.INGESTED, 0.13,
+                            "Syncing Frame.io B-roll library",
+                        )
+                        broll_library_dir = ensure_frameio_library(share_url, self.settings)
+                    except Exception as exc:
+                        if broll_source_mode == "frameio":
+                            raise ValueError(
+                                f"Frame.io B-roll source is not working: {exc}"
+                            ) from exc
+                        # both-mode: degrade to the machine-local library and
+                        # surface the problem without failing the job.
+                        job.warning = f"Frame.io B-roll library unavailable ({exc}); used local library."
+                        logger.warning("Frame.io B-roll sync failed; falling back to local library", exc_info=True)
+                elif broll_source_mode == "frameio":
+                    raise ValueError(
+                        "Frame.io B-roll source selected but no share URL is configured "
+                        "(set BROLL_FRAMEIO_SHARE_URL)"
+                    )
+
             if job.replicate and job.reference_path:
                 self._advance(job, cancellation, JobStatus.ANALYZING, 0.15, "Analyzing reference short")
                 job.reference = analyze_reference(job.reference_path, work_dir, self.settings)
@@ -414,9 +461,11 @@ class Pipeline:
                 # hook_tags. Prepend a matching library clip so the rendered
                 # short opens with the same kind of hook. Failure here is
                 # non-fatal — the regular broll_recovery ladder still
-                # produces the rest of the cuts.
+                # produces the rest of the cuts. Skipped in youtube-only
+                # mode (the hook is a library feature).
                 if (
-                    job.reference
+                    broll_use_library
+                    and job.reference
                     and job.reference.hook_span
                     and job.reference.hook_tags
                 ):
@@ -429,6 +478,7 @@ class Pipeline:
                                 hook_dur,
                                 work_dir / "hook",
                                 self.settings,
+                                library_dir=broll_library_dir,
                             )
                             if hook_clip is not None:
                                 job.hook_clip_path = hook_clip
@@ -565,6 +615,10 @@ class Pipeline:
                         intelligent=getattr(job, "use_intelligent_selector", True),
                         reference_house=reference_house,
                         ledger=continuity_ledger,
+                        library_dir=broll_library_dir,
+                        use_library=broll_use_library,
+                        use_youtube=broll_use_youtube,
+                        youtube_errors=youtube_errors,
                     )
                     self.store.save(job)
                 elif variation_count > 1:
@@ -586,6 +640,10 @@ class Pipeline:
                         intelligent=getattr(job, "use_intelligent_selector", True),
                         reference_house=reference_house,
                         ledger=continuity_ledger,
+                        library_dir=broll_library_dir,
+                        use_library=broll_use_library,
+                        use_youtube=broll_use_youtube,
+                        youtube_errors=youtube_errors,
                     )
                     job.broll_cuts = broll_cut_lists[0]
                     self.store.save(job)
@@ -607,9 +665,33 @@ class Pipeline:
                         intelligent=getattr(job, "use_intelligent_selector", True),
                         reference_house=reference_house,
                         ledger=continuity_ledger,
+                        library_dir=broll_library_dir,
+                        use_library=broll_use_library,
+                        use_youtube=broll_use_youtube,
+                        youtube_errors=youtube_errors,
                     )
                     broll_cut_lists[0] = job.broll_cuts
                     self.store.save(job)
+
+            # Surface hard YouTube failures collected during the B-roll
+            # ladder (bot-check, cookie problems, rate limits, timeouts).
+            # In youtube-only mode the user picked YouTube as THE source, so
+            # a broken YouTube must fail the job loudly rather than shipping
+            # a render quietly made of reference crops. In both-mode the
+            # Frame.io/library rung carried the job, so a warning suffices.
+            if youtube_errors:
+                unique_errors = list(dict.fromkeys(youtube_errors))
+                if broll_source_mode == "youtube":
+                    raise ValueError(
+                        "YouTube B-roll source is not working: "
+                        f"{unique_errors[0]}. Upload fresh cookies via the "
+                        "cookie box or switch the B-roll source."
+                    )
+                job.warning = (
+                    f"YouTube B-roll source had problems ({unique_errors[0]}) — "
+                    "B-roll came from the library/Frame.io rung."
+                )
+                self.store.save(job)
 
             # Prepend the hook B-roll (if any) as the first cut in every
             # variation list. The reference's first 0.5-3.5s of music-over-
@@ -1064,7 +1146,12 @@ def _music_render_options(job: Job):
     _music_volume_coefficient() measure the new file's source dB and compute
     the gain that lands at the target. Returns loop=False for an arbitrary
     user track (we don't know if it loops cleanly).
+
+    Disabled for now: music production is out of scope while the B-roll
+    pipeline is debugged, so renders always get no music track regardless
+    of source. Remove this early return to re-enable.
     """
+    return None, None, True
     reference_music = job.reference.music_path if job.reference else None
     reference_db = job.reference.music_volume_db if job.reference else None
     if job.music_path:

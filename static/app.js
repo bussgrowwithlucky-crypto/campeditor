@@ -24,10 +24,34 @@ const musicInput = document.getElementById("music");
 const brollPackCheckbox = document.getElementById("broll-pack");
 const enableLearnedBrollCheckbox = document.getElementById("enable-learned-broll");
 const useIntelligentSelectorCheckbox = document.getElementById("use-intelligent-selector");
+const brollSourceFrameio = document.getElementById("broll-source-frameio");
+const brollSourceYoutube = document.getElementById("broll-source-youtube");
+const brollSourceBoth = document.getElementById("broll-source-both");
 
 replicateCheckbox.addEventListener("change", () => {
   replicateFields.hidden = !replicateCheckbox.checked;
 });
+
+// B-roll source checkboxes: "Both" mirrors the two individual boxes.
+// Checking Both checks Frame.io + YouTube; unchecking either individual
+// box unchecks Both; checking both individual boxes re-checks Both.
+brollSourceBoth.addEventListener("change", () => {
+  brollSourceFrameio.checked = brollSourceBoth.checked;
+  brollSourceYoutube.checked = brollSourceBoth.checked;
+});
+[brollSourceFrameio, brollSourceYoutube].forEach((box) => {
+  box.addEventListener("change", () => {
+    brollSourceBoth.checked = brollSourceFrameio.checked && brollSourceYoutube.checked;
+  });
+});
+
+function resolveBrollSource() {
+  // null = nothing selected (validation error in the submit handler).
+  if (brollSourceFrameio.checked && brollSourceYoutube.checked) return "both";
+  if (brollSourceFrameio.checked) return "frameio";
+  if (brollSourceYoutube.checked) return "youtube";
+  return null;
+}
 
 let pollTimer = null;
 
@@ -74,6 +98,12 @@ form.addEventListener("submit", async (event) => {
       showError("Replicate needs a reference link or file");
       return;
     }
+    const brollSource = resolveBrollSource();
+    if (!brollSource) {
+      showError("Pick at least one B-roll source (Frame.io, YouTube, or Both)");
+      return;
+    }
+    data.append("broll_source", brollSource);
     data.append("reference_url", referenceUrlInput.value.trim());
     if (referenceInput.files[0]) {
       data.append("reference", referenceInput.files[0]);
@@ -123,6 +153,7 @@ async function poll(jobId) {
     const job = await readResponse(response);
     progressFill.style.width = `${Math.round(job.progress * 100)}%`;
     statusText.textContent = `${job.status.toUpperCase()} - ${job.message}`;
+    updateWarning(job.warning);
     updateEta(job);
 
     if (job.status === "ready") {
@@ -157,6 +188,25 @@ async function poll(jobId) {
     clearInterval(pollTimer);
     showError(err.message);
   }
+}
+
+function updateWarning(warning) {
+  // Non-fatal notice (e.g. "YouTube source unavailable — used Frame.io
+  // only"). Lives in its own element so it survives status-line updates.
+  let el = document.getElementById("warning-text");
+  if (!warning) {
+    if (el) el.hidden = true;
+    return;
+  }
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "warning-text";
+    el.style.color = "#b58900";
+    el.style.margin = "0.25rem 0 0";
+    statusText.insertAdjacentElement("afterend", el);
+  }
+  el.textContent = `⚠ ${warning}`;
+  el.hidden = false;
 }
 
 function updateEta(job) {

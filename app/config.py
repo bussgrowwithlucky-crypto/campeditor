@@ -118,6 +118,13 @@ class Settings(BaseSettings):
     broll_library_dir: Path = Field(
         default=Path("data/broll_library"), validation_alias="BROLL_LIBRARY_DIR"
     )
+    # Public Frame.io share whose videos act as the B-roll library when a
+    # job's broll_source is "frameio" or "both". Synced on demand into
+    # data_dir/broll_frameio/<share_id> (see app/frameio_source.py), so the
+    # library works on hosts (Render) that don't ship the local clip folder.
+    broll_frameio_share_url: str = Field(
+        default="", validation_alias="BROLL_FRAMEIO_SHARE_URL"
+    )
 
     # ---- YouTube search ----
     # Pure yt-dlp ytsearch — no Google API key needed. The Data API path

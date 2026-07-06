@@ -9,10 +9,8 @@ Seven stages, run once per job:
                              clip, cache the result forever (incremental).
   4. match_local           — cheap category/subject/setting scoring over the
                              index, LLM tie-break over the top 5.
-  5. search_youtube        — YouTube Data API search (key rotation on
-                             403/429), falling back to yt-dlp ytsearch; vision-
-                             compare the top 2 candidates' previews, pick the
-                             closer one.
+  5. search_youtube        — yt-dlp ytsearch; vision-compare the top 2
+                             candidates' previews, pick the closer one.
   6. crop_reference_cutaway — last resort: a caption-dodging crop of the
                               reference's own cutaway. Always succeeds.
   7. fetch_broll_cuts / fetch_broll_cut_variations / fetch_learned_broll_cuts
@@ -32,9 +30,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1091,17 +1086,23 @@ def _index_cache_path(settings: Settings) -> Path:
     return settings.data_dir / "cache" / "broll_index.json"
 
 
-def build_library_index(settings: Settings) -> list[LibraryClip]:
-    """Scan the local B-roll library once, tag every new/changed file with
+def build_library_index(settings: Settings, library_dir: Path | None = None) -> list[LibraryClip]:
+    """Scan a B-roll library dir once, tag every new/changed file with
     vision, and cache the result forever at data/cache/broll_index.json.
     Incremental: unchanged files (same mtime+size) are read straight from
-    cache, so only new library additions pay the vision cost."""
+    cache, so only new library additions pay the vision cost.
+
+    `library_dir` defaults to settings.broll_library_dir (the machine-local
+    clip folder); jobs whose broll_source is Frame.io pass the synced share
+    mirror instead. Cache entries are keyed by absolute path, so multiple
+    library dirs coexist in the one cache file."""
     # One-shot purge of the frame-tag cache when the prompt version stamp is
     # older than the live setting. Runs BEFORE any clip re-tag so newly-tagged
     # frames always come from the current prompt. Idempotent — second call
     # with the same live version is a no-op.
     _maybe_purge_frame_tag_cache(settings)
-    library_dir = settings.broll_library_dir
+    if library_dir is None:
+        library_dir = settings.broll_library_dir
     if not library_dir.exists():
         return []
     cache_path = _index_cache_path(settings)
@@ -1620,17 +1621,6 @@ def _is_browser_cookie_error(stderr: str) -> bool:
     return False
 
 
-def _iso8601_duration_to_seconds(value: str) -> float:
-    """Parse a YouTube contentDetails.duration (ISO-8601, e.g. 'PT1M30S')."""
-    if not value:
-        return 0.0
-    m = re.fullmatch(r"P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", value)
-    if not m:
-        return 0.0
-    days, hours, mins, secs = (int(g) if g else 0 for g in m.groups())
-    return days * 86400 + hours * 3600 + mins * 60 + secs
-
-
 def _is_junk_youtube_entry(url: str, title: str) -> bool:
     if "/shorts/" in url.lower():
         return True
@@ -1638,62 +1628,33 @@ def _is_junk_youtube_entry(url: str, title: str) -> bool:
     return any(term in title_lower for term in YT_JUNK_TITLE_TERMS)
 
 
-def _youtube_data_api_search(query: str, per_query: int, settings: Settings) -> list[dict] | None:
-    """Search via the Data API v3. Returns None (not []) when every key
-    failed/quota-exceeded, so the caller falls back to yt-dlp ytsearch."""
-    keys = settings.youtube_data_api_keys
-    if not keys:
-        return None
-    for key in keys:
-        try:
-            search_url = "https://www.googleapis.com/youtube/v3/search?" + urllib.parse.urlencode({
-                "part": "snippet", "q": query, "type": "video",
-                "maxResults": min(50, max(1, per_query)),
-                "videoEmbeddable": "true", "key": key,
-            })
-            with urllib.request.urlopen(search_url, timeout=SEARCH_TIMEOUT) as response:
-                data = json.loads(response.read())
-        except urllib.error.HTTPError as e:
-            if e.code in (403, 429):
-                logger.warning("YouTube Data API key rotated (HTTP %s)", e.code)
-                continue
-            logger.warning("YouTube Data API search failed (HTTP %s)", e.code)
-            return None
-        except Exception as e:
-            logger.warning("YouTube Data API search error (%s): %s", type(e).__name__, e)
-            continue
-
-        ids = [item.get("id", {}).get("videoId") for item in data.get("items", []) if item.get("id", {}).get("videoId")]
-        if not ids:
-            return []
-        durations: dict[str, float] = {}
-        try:
-            videos_url = "https://www.googleapis.com/youtube/v3/videos?" + urllib.parse.urlencode({
-                "part": "contentDetails", "id": ",".join(ids), "key": key,
-            })
-            with urllib.request.urlopen(videos_url, timeout=SEARCH_TIMEOUT) as response:
-                vdata = json.loads(response.read())
-            for item in vdata.get("items", []):
-                durations[item.get("id")] = _iso8601_duration_to_seconds(
-                    item.get("contentDetails", {}).get("duration", "")
-                )
-        except Exception:
-            pass
-        by_id = {item.get("id", {}).get("videoId"): item.get("snippet", {}) for item in data.get("items", [])}
-        entries = []
-        for video_id in ids:
-            snippet = by_id.get(video_id, {})
-            entries.append({
-                "id": video_id,
-                "url": f"https://www.youtube.com/watch?v={video_id}",
-                "duration": durations.get(video_id, 0.0),
-                "title": snippet.get("title") or "",
-            })
-        return entries
-    return None
+def _yt_search_failure_reason(stderr: str) -> str:
+    """Classify a failed yt-dlp run's stderr into a short user-facing reason.
+    Returns "" for output that doesn't look like a hard YouTube failure."""
+    lowered = (stderr or "").lower()
+    if "sign in to confirm" in lowered or "not a bot" in lowered or "captcha" in lowered:
+        return "YouTube is asking for sign-in / bot verification (cookies needed)"
+    if _is_browser_cookie_error(stderr or ""):
+        return "browser cookie extraction failed"
+    if "cookie" in lowered and ("invalid" in lowered or "expired" in lowered):
+        return "YouTube cookies are invalid or expired"
+    if "http error 429" in lowered or "too many requests" in lowered:
+        return "YouTube is rate-limiting this server (HTTP 429)"
+    if "unable to download" in lowered or "network" in lowered or "getaddrinfo" in lowered:
+        return "network error reaching YouTube"
+    return ""
 
 
-def _yt_dlp_search(query: str, per_query: int, settings: Settings) -> list[dict]:
+def _yt_dlp_search(
+    query: str,
+    per_query: int,
+    settings: Settings,
+    youtube_errors: list[str] | None = None,
+) -> list[dict]:
+    """yt-dlp ytsearch. Hard failures (timeout, bot-check, cookie problems,
+    empty output with a non-zero exit) are appended to `youtube_errors` so
+    the job layer can tell the user YouTube isn't working instead of
+    silently degrading to reference crops."""
     command = [
         sys.executable, "-m", "yt_dlp", "--dump-json", "--flat-playlist",
         "--no-download", "--ignore-errors", f"ytsearch{per_query}:{query}",
@@ -1701,6 +1662,8 @@ def _yt_dlp_search(query: str, per_query: int, settings: Settings) -> list[dict]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=SEARCH_TIMEOUT)
     except subprocess.TimeoutExpired:
+        if youtube_errors is not None:
+            youtube_errors.append(f"YouTube search timed out after {SEARCH_TIMEOUT:.0f}s")
         return []
     rows = []
     for line in result.stdout.splitlines():
@@ -1717,6 +1680,16 @@ def _yt_dlp_search(query: str, per_query: int, settings: Settings) -> list[dict]
             or (f"https://www.youtube.com/watch?v={video_id}" if video_id else None)
         )
         rows.append(info)
+    if not rows and youtube_errors is not None:
+        reason = _yt_search_failure_reason(result.stderr)
+        if reason:
+            youtube_errors.append(reason)
+        elif result.returncode != 0:
+            tail = (result.stderr or "").strip().splitlines()
+            youtube_errors.append(
+                f"yt-dlp exited with code {result.returncode}"
+                + (f": {tail[-1][:200]}" if tail else "")
+            )
     return rows
 
 
@@ -1732,12 +1705,10 @@ def _yt_search_cache_dir(settings: Settings) -> Path:
 
 def _yt_search_cache_key(query: str, settings: Settings) -> Path:
     """Filename hash for a (query, settings) cache entry. Settings fingerprints
-    YT_RESULTS_PER_QUERY + the API key set so a quota-rotated key still produces
-    a fresh entry."""
+    YT_RESULTS_PER_QUERY so a config change still produces a fresh entry."""
     fingerprint = "|".join([
         query.strip().lower(),
         str(YT_RESULTS_PER_QUERY),
-        ",".join(settings.youtube_data_api_keys) or "-",
     ])
     digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
     return _yt_search_cache_dir(settings) / f"{digest}.json"
@@ -1776,25 +1747,26 @@ def _yt_search_cache_write(query: str, settings: Settings, rows: list[dict]) -> 
         logger.debug("YouTube search cache write failed for query=%s", query)
 
 
-def _youtube_search_entries(queries: list[str], settings: Settings) -> list[dict]:
-    """Aggregate results across query variants, Data API first (falling back
-    to yt-dlp ytsearch per query on failure), deduped and junk-filtered.
+def _youtube_search_entries(
+    queries: list[str],
+    settings: Settings,
+    youtube_errors: list[str] | None = None,
+) -> list[dict]:
+    """Aggregate results across query variants via yt-dlp ytsearch, deduped
+    and junk-filtered.
 
     Each query is cached on disk for 7 days: re-running the same analysis
     (variations, retries, similar jobs) reuses the search and skips the
-    YouTube API quota burn + the yt-dlp round-trip entirely.
+    yt-dlp round-trip entirely.
     """
     seen_ids: set[str] = set()
     entries: list[dict] = []
     for query in queries:
-        api_rows: list[dict] | None
         cached = _yt_search_cache_read(query, settings)
         if cached is not None:
             api_rows = cached
         else:
-            fresh = _youtube_data_api_search(query, YT_RESULTS_PER_QUERY, settings)
-            api_rows = fresh if fresh is not None else _yt_dlp_search(query, YT_RESULTS_PER_QUERY, settings)
-            # Cache even the yt-dlp fallback so the next run skips it.
+            api_rows = _yt_dlp_search(query, YT_RESULTS_PER_QUERY, settings, youtube_errors)
             if api_rows:
                 _yt_search_cache_write(query, settings, api_rows)
         rows = api_rows or []
@@ -1862,6 +1834,7 @@ def search_youtube_candidates(
     *,
     reference_house: dict | None = None,
     intelligent: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[Path]:
     """Download + score up to `count` YouTube preview candidates for a profile.
 
@@ -1891,7 +1864,7 @@ def search_youtube_candidates(
     if wide.lower() != query.lower():
         queries.append(wide)
 
-    entries = _youtube_search_entries(queries, settings)
+    entries = _youtube_search_entries(queries, settings, youtube_errors)
     if not entries:
         return []
 
@@ -1955,9 +1928,9 @@ def search_youtube(
     *,
     reference_house: dict | None = None,
     intelligent: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> Path | None:
-    """Data-API-first search (key rotation on 403/429) with an automatic
-    yt-dlp ytsearch fallback. Thin shim over `search_youtube_candidates` that
+    """yt-dlp ytsearch. Thin shim over `search_youtube_candidates` that
     returns the single best preview (or None) — kept so the variation /
     single-clip call sites don't churn.
 
@@ -1968,6 +1941,7 @@ def search_youtube(
     candidates = search_youtube_candidates(
         profile, cache_dir, settings, count=1,
         reference_house=reference_house, intelligent=intelligent,
+        youtube_errors=youtube_errors,
     )
     return candidates[0] if candidates else None
 
@@ -2158,10 +2132,17 @@ def _gather_span_pool(
     reference_house: dict | None = None,
     job_id: str | None = None,
     ledger: "_ContinuityLedger | None" = None,
+    use_youtube: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[tuple[Path, str, str, float, float, float]]:
     """Per-span candidate pool for variation rotation: Local -> YouTube ->
     reference-crop. Always returns at least one entry (guaranteed by the
     reference-crop rung), padded to `pool_size` by repeating the last entry.
+
+    `use_youtube=False` skips the YouTube rung entirely (jobs whose
+    broll_source excludes YouTube); pass an empty `library_index` to skip
+    the library rung. `youtube_errors` collects hard YouTube failures
+    (bot-check / cookies / rate-limit) for the job layer to surface.
 
     `used_clips_lock` is required when multiple `_gather_span_pool` calls run
     concurrently (the BROLL_RECOVERY per-span parallelization). Local library
@@ -2188,7 +2169,7 @@ def _gather_span_pool(
     # 20s preview download + frame extract + vision-score round-trip just to
     # produce something the renderer will only show for 400ms. Reference crop
     # is instant and visually fine for sub-second cutaways.
-    skip_youtube = span_duration < MIN_YOUTUBE_SPAN_SECONDS
+    skip_youtube = (not use_youtube) or span_duration < MIN_YOUTUBE_SPAN_SECONDS
     # The confidence of the local match (0.0 until match_local finds one).
     # Used by the strict short-circuit below to skip the slow YouTube rung
     # even when `pool_size > 1` (variations mode) — a confident local match
@@ -2271,6 +2252,7 @@ def _gather_span_pool(
             yt_path = search_youtube(
                 profile, cache_dir / "youtube", settings,
                 reference_house=reference_house, intelligent=intelligent,
+                youtube_errors=youtube_errors,
             )
             if yt_path is not None:
                 # YouTube candidates don't carry the cinema-aware feature
@@ -2314,9 +2296,20 @@ def fetch_broll_cut_variations(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
+    library_dir: Path | None = None,
+    use_library: bool = True,
+    use_youtube: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[list[BrollCut]]:
     """Produce `variations` B-roll cut lists sharing timeline placement but
     drawing from different source clips per span where alternatives exist.
+
+    B-roll source gating (job.broll_source): `use_library=False` skips the
+    library rung entirely; `library_dir` points the library rung at a
+    non-default folder (the synced Frame.io mirror); `use_youtube=False`
+    skips the YouTube rung. The reference-crop rung always remains, so
+    span count matches the reference in every mode. `youtube_errors`
+    collects hard YouTube failures for the job layer to surface.
 
     Timing is absolute, not proportional: a reference cut at 0.1s-2.0s becomes
     an output cut at 0.1s-2.0s, scaled only when the output is shorter.
@@ -2342,7 +2335,7 @@ def fetch_broll_cut_variations(
     cache_dir.mkdir(parents=True, exist_ok=True)
     if diagnostics is not None:
         diagnostics.clear()
-    library_index = build_library_index(settings)
+    library_index = build_library_index(settings, library_dir) if use_library else []
 
     # House style (SPEC §8): computed ONCE per job from every span's tags
     # so per-span scoring can back-fill empty span vibe fields from a
@@ -2375,6 +2368,7 @@ def fetch_broll_cut_variations(
                 intelligent=intelligent,
                 reference_house=reference_house,
                 job_id=job_id, ledger=ledger,
+                use_youtube=use_youtube, youtube_errors=youtube_errors,
             ))
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2387,6 +2381,7 @@ def fetch_broll_cut_variations(
                     intelligent=intelligent,
                     reference_house=reference_house,
                     job_id=job_id, ledger=ledger,
+                    use_youtube=use_youtube, youtube_errors=youtube_errors,
                 ): index
                 for index, _out_start, _out_end, profile in aligned
             }
@@ -2399,6 +2394,20 @@ def fetch_broll_cut_variations(
                     results_by_index[index] = []
             # Preserve original alignment order so per-span diagnostics line up.
             pools = [results_by_index[index] for index, _, _, _ in aligned]
+
+    # `_gather_span_pool` is documented to always return >=1 entry, but an
+    # exception raised partway through it (e.g. a crashed YouTube search)
+    # loses that guarantee — the outer try/except above records an empty
+    # pool instead of propagating the crash. Backfill those spans with the
+    # same reference-crop fallback `_gather_span_pool` would have produced,
+    # so span count always matches the reference's B-roll cutaway count.
+    for i, (index, _out_start, _out_end, profile) in enumerate(aligned):
+        if pools[i]:
+            continue
+        crop_path = cache_dir / f"span_{index}" / "reference_crop.mp4"
+        cropped = crop_reference_cutaway(reference_path, (profile.start, profile.end), crop_path, settings)
+        if cropped is not None:
+            pools[i] = [(cropped, "reference_crop", "no local/YouTube match; cropped reference cutaway", 0.0, 0.0, 0.0)] * variations
 
     cut_lists: list[list[BrollCut]] = []
     for v in range(variations):
@@ -2450,8 +2459,12 @@ def fetch_hook_broll(
     hook_duration: float,
     work_dir: Path,
     settings: Settings,
+    library_dir: Path | None = None,
 ) -> Path | None:
     """Find a local library B-roll matching the reference's hook tags.
+
+    `library_dir` overrides the default library folder (jobs whose
+    broll_source is Frame.io pass the synced share mirror).
 
     The hook is the 0.5-3.5s lead-in cutaway at the start of the reference
     (see _detect_hook in app/replicate). The output pipeline prepends
@@ -2473,7 +2486,7 @@ def fetch_hook_broll(
     subjects = [str(s).lower() for s in (hook_tags.get("subjects") or [])]
     category = (hook_tags.get("category") or "").lower().strip()
 
-    library_index = build_library_index(settings)
+    library_index = build_library_index(settings, library_dir)
     if not library_index:
         return None
 
@@ -2545,6 +2558,10 @@ def fetch_broll_cuts(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
+    library_dir: Path | None = None,
+    use_library: bool = True,
+    use_youtube: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[BrollCut]:
     return fetch_broll_cut_variations(
         analysis, reference_path, clip_duration, cache_dir, settings,
@@ -2553,6 +2570,10 @@ def fetch_broll_cuts(
         job_id=job_id,
         reference_house=reference_house,
         ledger=ledger,
+        library_dir=library_dir,
+        use_library=use_library,
+        use_youtube=use_youtube,
+        youtube_errors=youtube_errors,
     )[0]
 
 
@@ -2578,10 +2599,13 @@ def _gather_pack_sources_for_span(
     reference_house: dict | None = None,
     job_id: str | None = None,
     ledger: "_ContinuityLedger | None" = None,
+    use_youtube: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[BrollPackItem]:
     """Per-span source gathering for the pack path, extracted so the parent
     loop can run it concurrently across spans. Same ladder (Local -> YouTube
     -> reference-crop) and same dedupe rules as the original inline loop.
+    `use_youtube=False` skips the YouTube rung (broll_source gating).
 
     `intelligent=True` enables the vibe/cinematography bonus during the
     local-library rung — see `match_local`. Has no effect on YouTube
@@ -2613,12 +2637,13 @@ def _gather_pack_sources_for_span(
 
     # Rung 2 — YouTube previews. Skipped for sub-MIN_YOUTUBE_SPAN_SECONDS spans
     # where the preview-download + vision-score cost dwarfs the on-screen gain.
-    if len(sources) < per_span and (out_end - out_start) >= MIN_YOUTUBE_SPAN_SECONDS:
+    if use_youtube and len(sources) < per_span and (out_end - out_start) >= MIN_YOUTUBE_SPAN_SECONDS:
         yt_remaining = per_span - len(sources)
         yt_dir = cache_dir / f"span_{span_index}" / "youtube"
         yt_candidates = search_youtube_candidates(
             profile, yt_dir, settings, count=yt_remaining,
             reference_house=reference_house, intelligent=intelligent,
+            youtube_errors=youtube_errors,
         )
         for yt_path in yt_candidates:
             resolved = yt_path.resolve()
@@ -2682,8 +2707,16 @@ def gather_broll_pack(
     job_id: str | None = None,
     reference_house: dict | None = None,
     ledger: "_ContinuityLedger | None" = None,
+    library_dir: Path | None = None,
+    use_library: bool = True,
+    use_youtube: bool = True,
+    youtube_errors: list[str] | None = None,
 ) -> list[BrollPackItem]:
     """Build a downloadable B-roll pack for the reference's detected spans.
+
+    B-roll source gating mirrors `fetch_broll_cut_variations`: `use_library`
+    / `library_dir` control the library rung, `use_youtube` the YouTube
+    rung, and `youtube_errors` collects hard YouTube failures.
 
     Walk every output-timeline span (same alignment / skip rules as
     `fetch_broll_cut_variations`) and collect up to `per_span` distinct
@@ -2720,7 +2753,7 @@ def gather_broll_pack(
         return []
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    library_index = build_library_index(settings)
+    library_index = build_library_index(settings, library_dir) if use_library else []
 
     # House-style back-fill (SPEC §8): one computation per job, passed
     # down to every per-span scoring call so empty span vibe fields can
@@ -2749,6 +2782,7 @@ def gather_broll_pack(
                 intelligent=intelligent,
                 reference_house=reference_house,
                 job_id=job_id, ledger=ledger,
+                use_youtube=use_youtube, youtube_errors=youtube_errors,
             )
             for span_index, out_start, out_end, profile in aligned
         ]
@@ -2763,6 +2797,7 @@ def gather_broll_pack(
                     intelligent=intelligent,
                     reference_house=reference_house,
                     job_id=job_id, ledger=ledger,
+                    use_youtube=use_youtube, youtube_errors=youtube_errors,
                 ): span_index
                 for span_index, out_start, out_end, profile in aligned
             }

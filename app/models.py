@@ -249,6 +249,15 @@ class Job(BaseModel):
     # Off = historical keyword-only matching. Persisted on the Job so the
     # audit row can surface which path ran.
     use_intelligent_selector: bool = True
+    # ── B-roll source selection (replicate jobs) ─────────────────────────
+    # Where span B-roll may come from: "frameio" (the synced Frame.io share
+    # only), "youtube" (YouTube search only), or "both" (default, ladder
+    # tries Frame.io library first then YouTube). The reference-crop rung
+    # stays as the guaranteed fallback in every mode.
+    broll_source: str = "both"
+    # Non-fatal notice surfaced to the UI (e.g. "YouTube unavailable — used
+    # Frame.io only"). Unlike `error` it doesn't fail the job.
+    warning: str = ""
     transcript: Transcript = Field(default_factory=Transcript)
     title: Title | None = None
     output_path: Path | None = None
@@ -313,6 +322,8 @@ class JobSummary(BaseModel):
     # and carries the span + rank metadata so the UI can group them.
     broll_pack_urls: list[BrollPackDownload] = Field(default_factory=list)
     error: str | None = None
+    # Non-fatal notice (e.g. YouTube source unavailable in "both" mode).
+    warning: str = ""
     # Estimated total editing time in seconds. UI uses this to show "ETA: ~2m
     # remaining" while the job is in progress.
     eta_seconds: float | None = None

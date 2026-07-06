@@ -1,5 +1,7 @@
 import json
+import logging
 import shutil
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,6 +17,24 @@ from app.models import BrollPackDownload, ClipMode, ColorGrade, Job, JobSummary,
 from app.store import JobStore
 from app.youtube_cookies import save_youtube_cookies
 
+logger = logging.getLogger(__name__)
+
+
+def _warm_frameio_library(settings: Settings) -> None:
+    """Background startup warm-up: sync the configured Frame.io share and
+    vision-tag its clips so the first Frame.io-sourced job doesn't pay the
+    whole download + index cost inside its own watchdog budget. Failures
+    are logged, never fatal — the job path re-attempts the sync itself."""
+    try:
+        from app.broll import build_library_index
+        from app.frameio_source import ensure_frameio_library
+
+        library_dir = ensure_frameio_library(settings.broll_frameio_share_url, settings)
+        build_library_index(settings, library_dir)
+        logger.info("Frame.io B-roll library warm-up complete: %s", library_dir)
+    except Exception:
+        logger.exception("Frame.io B-roll library warm-up failed (jobs will retry)")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,6 +48,11 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.store = store
     app.state.pipeline = Pipeline(settings, store)
+    if settings.broll_frameio_share_url.strip():
+        threading.Thread(
+            target=_warm_frameio_library, args=(settings,),
+            name="frameio-warmup", daemon=True,
+        ).start()
     yield
     app.state.pipeline.shutdown()
 
@@ -103,6 +128,7 @@ def _summary(job: Job) -> JobSummary:
         variation_urls=variation_urls,
         broll_pack_urls=broll_pack_urls,
         error=job.error,
+        warning=getattr(job, "warning", "") or "",
         eta_seconds=job.eta_seconds,
         stage_timings=job.stage_timings,
     )
@@ -125,6 +151,7 @@ def upload_job(
     broll_pack: bool = Form(False),
     enable_learned_broll: bool = Form(True),
     use_intelligent_selector: bool = Form(True),
+    broll_source: str = Form("both"),
     pipeline: Pipeline = Depends(get_pipeline),
 ) -> JobSummary:
     try:
@@ -144,6 +171,7 @@ def upload_job(
             broll_pack=broll_pack,
             enable_learned_broll=enable_learned_broll,
             use_intelligent_selector=use_intelligent_selector,
+            broll_source=broll_source,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

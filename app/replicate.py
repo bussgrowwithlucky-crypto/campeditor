@@ -547,7 +547,13 @@ def _extract_music(
     reference audio — the instrumental keeps the exact same timeline, so music
     hits land at the same timestamps as the reference. Fallback when separation
     is unavailable/fails: the old longest-speech-free-gap loop.
+
+    Disabled for now (Render deployment: no local models, API keys only, and
+    music production is out of scope while the B-roll pipeline is debugged).
+    Short-circuits to None so no cloud/CPU work runs. Revert this early
+    return to re-enable.
     """
+    return None
     separated = _separate_instrumental(reference_path, ref_dir, settings)
     if separated is not None:
         return separated

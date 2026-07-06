@@ -15,8 +15,13 @@ import json
 import logging
 import re
 import shutil
+import time
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -218,3 +223,70 @@ def sync_frameio_share(url: str, target_dir: Path) -> dict:
         "failed": failed,
         "stopped_low_disk": stopped_low_disk,
     }
+
+
+# Skip re-walking the share (many GraphQL round-trips even when every file is
+# already on disk) if the last successful sync is younger than this.
+_SYNC_TTL_SECONDS = 15 * 60
+
+
+def ensure_frameio_library(share_url: str, settings: "Settings") -> Path:
+    """Mirror the Frame.io share into a dedicated B-roll library dir and
+    return that dir. Deliberately NOT settings.broll_library_dir: when a job
+    selects the Frame.io source, its library must be exactly the share's
+    contents — never the machine-local clip folder.
+
+    Idempotent and cheap after the first run: sync_frameio_share skips files
+    already on disk, and a `.last_sync` marker skips the share walk entirely
+    when it ran successfully within _SYNC_TTL_SECONDS.
+
+    Raises RuntimeError with a user-facing message when the share can't be
+    reached or yields no videos.
+    """
+    share_id = extract_share_id(share_url)
+    if not share_id:
+        raise RuntimeError(f"Not a valid Frame.io share URL: {share_url}")
+    library_dir = settings.data_dir / "broll_frameio" / share_id
+    marker = library_dir / ".last_sync"
+
+    def has_videos() -> bool:
+        return any(
+            p.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".m4v")
+            for p in library_dir.rglob("*") if p.is_file()
+        )
+
+    if marker.exists() and has_videos():
+        try:
+            if time.time() - float(marker.read_text(encoding="utf-8").strip()) < _SYNC_TTL_SECONDS:
+                return library_dir
+        except (ValueError, OSError):
+            pass
+
+    try:
+        result = sync_frameio_share(share_url, library_dir)
+    except Exception as exc:
+        # A previously synced copy is still a usable library even when the
+        # share is briefly unreachable (network blip, Frame.io hiccup).
+        if has_videos():
+            logger.warning("Frame.io re-sync failed (%s); using existing local mirror", exc)
+            return library_dir
+        raise RuntimeError(
+            f"Frame.io share is not reachable ({type(exc).__name__}: {exc}). "
+            "Check the share URL / your network."
+        ) from exc
+
+    if not has_videos():
+        raise RuntimeError(
+            "Frame.io share sync finished but no videos were found "
+            f"(downloaded={len(result['downloaded'])}, failed={len(result['failed'])}). "
+            "Check that the share contains video files."
+        )
+    try:
+        marker.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        logger.debug("Could not write Frame.io sync marker", exc_info=True)
+    logger.info(
+        "Frame.io B-roll library ready at %s (downloaded=%d skipped=%d failed=%d)",
+        library_dir, len(result["downloaded"]), len(result["skipped"]), len(result["failed"]),
+    )
+    return library_dir
